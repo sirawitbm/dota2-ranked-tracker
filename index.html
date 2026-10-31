@@ -341,26 +341,25 @@ function render() {
 const dots = parts => parts.filter(Boolean).map(p => `<span class="nw">${p}</span>`).join(" · ");
 
 // Pair each MMR you logged with the one ranked game that ended since the log before it.
-// pending = the latest logged change when OpenDota hasn't got that game yet. Same rules as mmr_deltas() in rank_overlay.py.
+// unseen = [t, delta] for logged changes with no game on OpenDota (not fetched yet, or never). Same rules as mmr_deltas() in rank_overlay.py.
 function mmrInfo() {
-  const log = store.get("dota.mmr." + accountId(), []), byMatch = {};
-  let pending = null, pendingT = null;
+  const log = store.get("dota.mmr." + accountId(), []), byMatch = {}, unseen = [];
   for (let i = 1; i < log.length; i++) {
     const g = data.ranked.filter(m => { const end = (m.start_time + m.duration) * 1000; return end > log[i - 1].t && end < log[i].t; });
     if (g.length === 1) byMatch[g[0].match_id] = log[i].mmr - log[i - 1].mmr;
-    else if (!g.length && i === log.length - 1 && log[i].mmr !== log[i - 1].mmr) [pending, pendingT] = [log[i].mmr - log[i - 1].mmr, log[i].t];
+    else if (!g.length && log[i].mmr !== log[i - 1].mmr) unseen.push([log[i].t, log[i].mmr - log[i - 1].mmr]);
   }
-  return { byMatch, pending, pendingT };
+  return { byMatch, unseen };
 }
 const mmrByMatch = () => mmrInfo().byMatch;
 
 // Session = every ranked game that started at or after `start` (ms). Same rules as session_summary() in rank_overlay.py.
 function sessionSummary(start) {
-  const { byMatch, pending, pendingT } = mmrInfo();
+  const { byMatch, unseen } = mmrInfo();
   const games = data.ranked.filter(m => m.start_time * 1000 >= start);
   let n = games.length, w = games.filter(won).length, mmr = 0, known = 0;
   for (const m of games) if (byMatch[m.match_id] != null) { mmr += byMatch[m.match_id]; known++; }
-  if (pending && pendingT >= start) { n++; w += pending > 0; mmr += pending; known++; }
+  for (const [t, d] of unseen) if (t >= start) { n++; w += d > 0; mmr += d; known++; }  // games OpenDota doesn't have
   return { n, w, l: n - w, mmr, known };
 }
 const sessionKey = () => "dota.session." + accountId();

@@ -14,10 +14,13 @@ def game(mid, end, win=True):  # ranked game that ended at `end` seconds
 
 
 log = [{"t": 1000 * S, "mmr": 3000}, {"t": 2000 * S, "mmr": 3025}, {"t": 3000 * S, "mmr": 3001}]
-assert mmr_deltas(log, [game(1, 1500)]) == ({1: 25}, -24, 3000 * S)  # 2nd game not on OpenDota yet
-assert mmr_deltas(log, [game(2, 2500, False), game(1, 1500)]) == ({1: 25, 2: -24}, None, None)
-assert mmr_deltas(log, [game(1, 1500), game(3, 1600)]) == ({}, -24, 3000 * S)  # two games in one gap: can't split
-assert mmr_deltas([], []) == ({}, None, None)
+assert mmr_deltas(log, [game(1, 1500)]) == ({1: 25}, [(3000 * S, -24)])  # 2nd game not on OpenDota yet
+assert mmr_deltas(log, [game(2, 2500, False), game(1, 1500)]) == ({1: 25, 2: -24}, [])
+assert mmr_deltas(log, [game(1, 1500), game(3, 1600)]) == ({}, [(3000 * S, -24)])  # two games in one gap: can't split
+assert mmr_deltas([], []) == ({}, [])
+# OpenDota never got the 1st game: its change must not vanish once a newer game arrives
+assert mmr_deltas(log, [game(2, 2500, False)]) == ({2: -24}, [(2000 * S, 25)])
+assert session_summary(0, [game(2, 2500, False)], log) == (1, 1, 1, 2)
 
 # a re-log within 10 minutes replaces the last entry (typo fix), later ones append
 assert add_log(log, 3010, 3000 * S + 60 * S)[-2:] == [log[1], {"t": 3060 * S, "mmr": 3010}]

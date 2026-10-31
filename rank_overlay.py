@@ -117,16 +117,16 @@ def won(m):
 def mmr_deltas(log, matches):
     """Valve doesn't share per-game MMR, so we pair the MMR you log with the one
     ranked game that ended since your previous log. Returns ({match_id: delta},
-    pending, pending_t) where pending is the latest delta OpenDota has no game for
-    yet. Same rules as mmrInfo() in index.html."""
-    by_match, pending, pending_t = {}, None, None
+    unseen) where unseen is [(log time, delta)] for MMR changes with no game on
+    OpenDota (not fetched yet, or OpenDota never got it). Same rules as mmrInfo() in index.html."""
+    by_match, unseen = {}, []
     for prev, cur in zip(log, log[1:]):
         games = [m for m in matches if prev["t"] < (m["start_time"] + m["duration"]) * 1000 < cur["t"]]
         if len(games) == 1:
             by_match[games[0]["match_id"]] = cur["mmr"] - prev["mmr"]
-        elif not games and cur is log[-1] and cur["mmr"] != prev["mmr"]:
-            pending, pending_t = cur["mmr"] - prev["mmr"], cur["t"]
-    return by_match, pending, pending_t
+        elif not games and cur["mmr"] != prev["mmr"]:
+            unseen.append((cur["t"], cur["mmr"] - prev["mmr"]))
+    return by_match, unseen
 
 
 def add_log(log, mmr, now_ms):
@@ -154,14 +154,13 @@ def accept(log, value, prev):
 def session_summary(start, matches, log):
     """Ranked games that started at/after start (ms): (wins, losses, mmr total, games with a known +/-).
     Same rules as sessionSummary() in index.html."""
-    by_match, pending, pending_t = mmr_deltas(log, matches)
+    by_match, unseen = mmr_deltas(log, matches)
     games = [m for m in matches if m["start_time"] * 1000 >= start]
-    wins, n = sum(map(won, games)), len(games)
     known = [by_match[m["match_id"]] for m in games if m["match_id"] in by_match]
-    if pending and pending_t >= start:  # a game you logged that OpenDota hasn't got yet
-        n, wins = n + 1, wins + (pending > 0)
-        known.append(pending)
-    return wins, n - wins, sum(known), len(known)
+    extra = [d for t, d in unseen if t >= start]  # games you logged that OpenDota doesn't have
+    wins = sum(map(won, games)) + sum(d > 0 for d in extra)
+    n = len(games) + len(extra)
+    return wins, n - wins, sum(known) + sum(extra), len(known) + len(extra)
 
 
 # --- Windows bits (signatures declared; undeclared ctypes calls fail silently on 64-bit) ---
@@ -477,14 +476,17 @@ class Overlay(QWidget):
             p.setPen(color)
             p.drawText(QRectF(tx, 9, right - tx, 20), Qt.AlignLeft | Qt.AlignVCenter, text)
 
-        # last 5: newest on the left. A game you logged MMR for but OpenDota
-        # hasn't fetched yet goes first, drawn dashed.
-        by_match, pending, _ = mmr_deltas(log, matches)
-        boxes = ([{"pending": pending}] if pending else []) + matches
+        # last 5: newest on the left. Games you logged MMR for that OpenDota
+        # doesn't have (yet) slot in by time, drawn dashed.
+        by_match, unseen = mmr_deltas(log, matches)
+        boxes = sorted([{"t": t, "pending": d} for t, d in unseen] +
+                       [dict(m, t=(m["start_time"] + m["duration"]) * 1000) for m in matches[:5]],
+                       key=lambda b: -b["t"])
         size, gap, y = 24, 5, 34
         for i in range(5):
             r = QRectF(x + i * (size + gap), y, size, size)
             if i < len(boxes) and "pending" in boxes[i]:
+                pending = boxes[i]["pending"]
                 c = WIN if pending > 0 else LOSS
                 p.setPen(QPen(c, 1.2, Qt.DashLine))
                 p.setBrush(Qt.NoBrush)
