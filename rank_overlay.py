@@ -19,8 +19,8 @@ from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetric
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWidgets import (QApplication, QInputDialog, QMenu, QSystemTrayIcon,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QInputDialog, QMenu, QSpinBox,
+                               QSystemTrayIcon, QWidget)
 
 API = "https://api.opendota.com/api"
 ICONS = "https://www.opendota.com/assets/images/dota2/rank_icons"
@@ -33,6 +33,25 @@ SETTINGS = DATA_DIR / "settings.json"
 POLL_MS = 3 * 60 * 1000
 RETYPE_MS = 10 * 60 * 1000  # no ranked game ends this fast, so a re-log this soon is a typo fix
 HOTKEYS = {1: 0x52, 2: 0x4D}  # id -> key: Ctrl+Shift+R hide/show, Ctrl+Shift+M log MMR
+
+# menu and dialogs in the widget's colours instead of the plain Windows look
+STYLE = """
+QMenu { background: #171b22; border: 1px solid #2c333e; border-radius: 10px; padding: 6px; color: #e6e8eb; font: 10pt "Segoe UI"; }
+QMenu::item { padding: 7px 28px 7px 14px; border-radius: 6px; }
+QMenu::item:selected { background: #2a303b; }
+QMenu::separator { height: 1px; background: #2c333e; margin: 5px 8px; }
+QDialog { background: #171b22; }
+QDialog QLabel { color: #8b93a1; font: 10pt "Segoe UI"; }
+QLineEdit, QSpinBox { background: #0b0d11; color: #e6e8eb; border: 1px solid #2c333e; border-radius: 8px;
+                      padding: 8px 10px; font: 11pt "Segoe UI"; selection-background-color: #c23b2a; selection-color: #ffffff; }
+QSpinBox { font: 600 20pt "Segoe UI"; }
+QLineEdit:focus, QSpinBox:focus { border-color: #d9a441; }
+QPushButton { background: transparent; color: #e6e8eb; border: 1px solid #2c333e; border-radius: 8px;
+              padding: 7px 16px; font: 600 10pt "Segoe UI"; min-width: 64px; }
+QPushButton:hover { border-color: #4a5260; }
+QPushButton:default { background: #c23b2a; border-color: #c23b2a; }
+QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; padding: 6px; }
+"""
 
 WIN, LOSS, BG, LINE, TEXT, DIM, GOLD = (QColor("#4cc26b"), QColor("#e0533f"), QColor(14, 17, 22, 225),
                                         QColor("#2c333e"), QColor("#e6e8eb"), QColor("#8b93a1"), QColor("#d9a441"))
@@ -263,13 +282,23 @@ class Overlay(QWidget):
         p.setBrush(BG)
         p.drawRoundedRect(card, 12, 12)
 
-        # medal
+        # medal; leaderboard spot sits on it like in Dota
+        lb = self.state and self.state["player"].get("leaderboard_rank")
         if self.medal:
             p.drawPixmap(QRectF(8, 5, 64, 64).toRect(), self.medal)
+            if lb:
+                p.setFont(self._font(8, QFont.Bold))
+                for dx, dy, c in ((1, 1, QColor(0, 0, 0, 220)), (0, 0, GOLD)):  # shadow, then text
+                    p.setPen(c)
+                    p.drawText(QRectF(8 + dx, 50 + dy, 64, 14), Qt.AlignCenter, f"#{lb}")
         else:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor("#1d222b"))
             p.drawEllipse(QRectF(14, 11, 52, 52))
+            if self.state:  # loaded but no medal = uncalibrated
+                p.setPen(DIM)
+                p.setFont(self._font(18, QFont.Bold))
+                p.drawText(QRectF(14, 11, 52, 52), Qt.AlignCenter, "?")
 
         x, right = 80, self.W - 12
         if not self.state:
@@ -281,18 +310,10 @@ class Overlay(QWidget):
 
         player, matches = self.state["player"], self.state["matches"]
         log = self.app.mmr_log()
-        tier, lb = player.get("rank_tier"), player.get("leaderboard_rank")
-
-        # top row: medal name (+ leaderboard spot) on the left, session or today on the right
+        # top row: medal name on the left, session or today on the right
         p.setFont(self._font(11, QFont.Bold))
         p.setPen(TEXT)
-        name = rank_name(tier)
-        p.drawText(QRectF(x, 9, right - x, 20), Qt.AlignLeft | Qt.AlignVCenter, name)
-        if lb:
-            nx = x + QFontMetrics(p.font()).horizontalAdvance(name) + 5
-            p.setPen(GOLD)
-            p.setFont(self._font(9, QFont.DemiBold))
-            p.drawText(QRectF(nx, 9, right - nx, 20), Qt.AlignLeft | Qt.AlignVCenter, f"#{lb}")
+        p.drawText(QRectF(x, 9, right - x, 20), Qt.AlignLeft | Qt.AlignVCenter, rank_name(player.get("rank_tier")))
         start = self.app.session_start()
         if start:
             w, l, mmr, known = session_summary(start, matches, log)
@@ -301,7 +322,7 @@ class Overlay(QWidget):
             midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
             today = [m for m in matches if m["start_time"] >= midnight]
             w = sum(map(won, today))
-            parts = [(f"today {w}–{len(today) - w}", DIM)] if today and not lb else []
+            parts = [(f"today {w}–{len(today) - w}", DIM)] if today else []
         tx = right
         for text, color in reversed(parts):  # right-aligned, drawn right to left
             p.setFont(self._font(8, QFont.DemiBold if color != DIM else QFont.Normal))
@@ -340,10 +361,10 @@ class Overlay(QWidget):
                 if m["match_id"] == self.new_match:
                     p.setPen(QPen(TEXT, 1.5))
                     p.drawRoundedRect(r.adjusted(-2.5, -2.5, 2.5, 2.5), 7, 7)
-            else:
-                p.setPen(QPen(LINE, 1, Qt.DashLine))
-                p.setBrush(Qt.NoBrush)
-                p.drawRoundedRect(r, 5, 5)
+            else:  # not played yet
+                p.setPen(QPen(QColor("#4a5260"), 1, Qt.DashLine))
+                p.setBrush(QColor(255, 255, 255, 8))
+                p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
 
     def _delta(self, p, r, d):
         if d is None:
@@ -463,12 +484,14 @@ class App:
         self.busy = False
         self.asking = False
 
-        self.menu = QMenu()
-        self.toggle_act = QAction("Hide widget  (Ctrl+Shift+R)", self.menu, triggered=self.toggle_overlay)
+        self.menu = QMenu()  # rounded corners need a see-through, frameless popup
+        self.menu.setAttribute(Qt.WA_TranslucentBackground)
+        self.menu.setWindowFlags(self.menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self.toggle_act = QAction("Hide widget\tCtrl+Shift+R", self.menu, triggered=self.toggle_overlay)
         self.session_act = QAction("Start session", self.menu, triggered=self.toggle_session)
         self.menu.addAction(self.toggle_act)
         self.menu.addAction(QAction("Open full stats", self.menu, triggered=self.open_stats))
-        self.menu.addAction(QAction("Log MMR…  (Ctrl+Shift+M)", self.menu, triggered=self.log_mmr))
+        self.menu.addAction(QAction("Log MMR…\tCtrl+Shift+M", self.menu, triggered=self.log_mmr))
         self.menu.addAction(self.session_act)
         self.menu.addAction(QAction("Check for new games now", self.menu, triggered=lambda: self.poll(True)))
         self.menu.addAction(QAction("Change account…", self.menu, triggered=self.ask_account))
@@ -494,7 +517,7 @@ class App:
                                   f"Ctrl+Shift+{'/'.join(taken)} is taken by another app; use the tray menu instead.")
         if self.settings.get("hidden"):
             self.overlay.hide()
-            self.toggle_act.setText("Show widget  (Ctrl+Shift+R)")
+            self.toggle_act.setText("Show widget\tCtrl+Shift+R")
 
         self.timer = QTimer(timeout=lambda: self.poll(True))
         self.timer.start(POLL_MS)
@@ -512,11 +535,10 @@ class App:
         self.overlay.move(x, y)
 
     def ask_account(self):
-        text, ok = QInputDialog.getText(None, "Dota Rank Tracker",
-                                        "Your Dota friend ID, or a Steam / OpenDota / Dotabuff link:\n"
-                                        "(Turn on 'Expose Public Match Data' in Dota settings.)",
-                                        text=self.settings.get("account", ""))
-        account = ok and parse_id(text)
+        d = dialog("Dota Rank Tracker", "Your Dota friend ID, or a Steam / OpenDota / Dotabuff link.\n"
+                                        "Turn on Expose Public Match Data in Dota's settings first.")
+        d.setTextValue(self.settings.get("account", ""))
+        account = d.exec() and parse_id(d.textValue())
         if not account:
             return False
         self.settings["account"] = account
@@ -563,9 +585,14 @@ class App:
         self.asking = True
         try:
             log = self.mmr_log()
-            value, ok = QInputDialog.getInt(None, "Log MMR", "Your MMR now (Dota → Profile → Stats):",
-                                            log[-1]["mmr"] if log else 3000, 0, 20000, 1,
-                                            Qt.WindowStaysOnTopHint)
+            d = dialog("Log MMR", "Your MMR now  (Dota → Profile → Stats)")
+            d.setInputMode(QInputDialog.IntInput)
+            d.setIntRange(0, 20000)
+            d.setIntValue(log[-1]["mmr"] if log else 3000)
+            if spin := d.findChild(QSpinBox):
+                spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            ok = d.exec()
+            value = d.intValue()
         finally:
             self.asking = False
         if ok:
@@ -590,7 +617,7 @@ class App:
             pin_topmost(int(self.overlay.winId()))
         self.settings["hidden"] = not show
         save_settings(self.settings)
-        self.toggle_act.setText(("Hide" if show else "Show") + " widget  (Ctrl+Shift+R)")
+        self.toggle_act.setText(("Hide" if show else "Show") + " widget\tCtrl+Shift+R")
 
     def open_stats(self):
         if not self.stats:
@@ -603,6 +630,15 @@ class App:
     def quit(self):
         self.tray.hide()
         self.qt.exit(0)  # exit, not quit: the stats window ignores close
+
+
+def dialog(title, label):
+    d = QInputDialog(None, Qt.WindowStaysOnTopHint)
+    d.setWindowTitle(title)
+    d.setLabelText(label)
+    d.setMinimumWidth(340)
+    dark_title_bar(int(d.winId()))
+    return d
 
 
 def app_icon():
@@ -626,6 +662,7 @@ def main():
     qt = QApplication(sys.argv)
     qt.setQuitOnLastWindowClosed(False)
     qt.setApplicationName("Dota Rank Tracker")
+    qt.setStyleSheet(STYLE)
     App(qt)
     sys.exit(qt.exec())
 

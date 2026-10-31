@@ -29,15 +29,20 @@
   .small { font-size: 12px; }
   #status { min-height: 20px; }
 
-  .profile { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-  .avatar { width: 64px; height: 64px; border-radius: 8px; }
-  .medal { position: relative; width: 84px; height: 84px; flex: none; }
+  .profile { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .who { flex: 1; min-width: 0; }
+  .actions { justify-content: flex-end; }
+  .avatar { width: 28px; height: 28px; border-radius: 50%; }
+  .medal { position: relative; width: 104px; height: 104px; flex: none; }
   .medal img { position: absolute; inset: 0; width: 100%; height: 100%; }
-  .medal .lb { position: absolute; bottom: 6px; width: 100%; text-align: center; font-weight: 700; font-size: 13px; text-shadow: 0 1px 3px #000; }
-  .name { font-size: 22px; font-weight: 700; }
-  .rankname { font-size: 18px; font-weight: 600; }
+  .medal .lb { position: absolute; bottom: 8px; width: 100%; text-align: center; font-weight: 700; font-size: 14px; color: var(--gold); text-shadow: 0 1px 3px #000, 0 0 2px #000; }
+  .medal .none { position: absolute; inset: 14px; border-radius: 50%; background: #1d222b; display: grid; place-items: center; color: var(--dim); font-size: 28px; font-weight: 700; }
+  .name { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rankname { font-size: 26px; font-weight: 700; margin: 2px 0; }
+  h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+  .nw { white-space: nowrap; }
 
-  .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .tiles { display: grid; gap: 10px; grid-template-columns: repeat(5, 1fr); }
   .tile { background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
   .tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .tile .k { font-size: 12px; color: var(--dim); }
@@ -65,6 +70,21 @@
   tr.insession td { background: rgba(217,164,65,.06); }
   button.flag { height: 28px; padding: 0 8px; background: transparent; border-color: var(--line); color: var(--dim); font-weight: 500; }
   button.flag:hover { color: var(--gold); border-color: var(--gold); }
+  tr.group td { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding-top: 12px; border-bottom: 0; }
+
+  @media (max-width: 640px) {
+    main { padding: 10px; }
+    .medal { width: 76px; height: 76px; }
+    .rankname { font-size: 21px; }
+    .actions { justify-content: flex-start; width: 100%; }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .big img { width: 72px; }
+    .opt { display: none; }
+    .bar { min-width: 36px; }
+    th, td { padding: 6px 5px; }
+    td img.hero { width: 26px; height: 26px; margin-right: 4px; }
+    .hname { display: inline-block; max-width: 84px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  }
 </style>
 </head>
 <body>
@@ -80,17 +100,18 @@
   <div id="app" class="hidden">
     <div class="card">
       <div class="profile">
-        <img id="avatar" class="avatar" alt="">
-        <div style="flex:1;min-width:180px">
-          <div class="name" id="pname"></div>
+        <div class="medal" id="medal"></div>
+        <div class="who">
+          <div class="row" style="gap:8px;flex-wrap:nowrap"><img id="avatar" class="avatar" alt=""><span class="name" id="pname"></span></div>
           <div class="rankname" id="rankname"></div>
           <div class="small dim" id="pextra"></div>
         </div>
-        <div class="medal" id="medal"></div>
+        <div class="row actions">
+          <button id="newest">Get newest games</button>
+          <button class="ghost" id="reload">Reload</button>
+        </div>
       </div>
-      <div class="row" style="margin-top:12px">
-        <button id="newest">Get newest games</button>
-        <button class="ghost" id="reload">Reload</button>
+      <div class="row" style="margin-top:10px;justify-content:space-between">
         <label class="small dim row" style="gap:6px"><input type="checkbox" id="auto" style="flex:none;height:auto"> auto-check every 3 min</label>
         <span id="status" class="small dim"></span>
       </div>
@@ -118,8 +139,8 @@
     </div>
 
     <div class="grid" style="margin-bottom:14px">
-      <div class="card"><h2>Ranked form (last 100, +1 win / −1 loss)</h2><canvas id="formChart"></canvas></div>
-      <div class="card"><h2>Average medal in your games</h2><canvas id="lobbyChart"></canvas><div class="small dim" id="lobbyNote"></div></div>
+      <div class="card"><h2>Ranked form<span class="sub">last 100 · +1 win, −1 loss</span></h2><canvas id="formChart"></canvas></div>
+      <div class="card"><h2>Lobby medal<span class="sub">5-game average</span></h2><canvas id="lobbyChart"></canvas><div class="small dim" id="lobbyNote"></div></div>
     </div>
 
     <div class="card">
@@ -131,14 +152,16 @@
     </div>
 
     <div class="grid" style="margin-bottom:14px">
-      <div class="card"><h2>Rank history</h2>
-        <div class="small dim" style="margin-bottom:8px">Medal changes are saved on this PC. Log your MMR after each game (Dota → Profile → Stats) and every game gets its exact +/-.</div>
+      <div class="card"><h2>MMR history</h2>
+        <div class="small dim" style="margin-bottom:8px">Log your MMR after each game (Dota → Profile → Stats) and every game gets its exact +/-.</div>
         <div class="small gold hidden" id="appMmrNote" style="margin-bottom:10px">Log MMR from the widget: Ctrl+Shift+M, or right-click it → Log MMR.</div>
         <div class="row" style="margin-bottom:10px" id="mmrRow"><input id="mmrInput" type="number" inputmode="numeric" placeholder="My MMR right now"><button id="mmrSave">Log MMR</button></div>
+        <div class="small" id="sinceLog" style="margin-bottom:8px"></div>
         <canvas id="mmrChart" class="hidden"></canvas>
         <div class="tablewrap"><table id="rankHist"></table></div>
+        <div class="small dim" id="medalHist" style="margin-top:10px"></div>
       </div>
-      <div class="card"><h2>By role / party / side</h2><div class="tablewrap"><table id="splits"></table></div></div>
+      <div class="card"><h2>Win rate by</h2><div class="tablewrap"><table id="splits"></table></div></div>
     </div>
 
     <div class="grid">
@@ -196,7 +219,7 @@ function ago(t) {
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 function medalHtml(tier, lb) {
-  if (!tier) return "";
+  if (!tier) return `<div class="none">?</div>`;
   const t = Math.floor(tier / 10), stars = tier % 10;
   return `<img src="https://www.opendota.com/assets/images/dota2/rank_icons/rank_icon_${t}.png" alt="">` +
     (stars ? `<img src="https://www.opendota.com/assets/images/dota2/rank_icons/rank_star_${stars}.png" alt="">` : "") +
@@ -281,9 +304,9 @@ function render() {
     return `<a class="big ${w ? "w" : "l"}" href="https://www.opendota.com/matches/${m.match_id}" target="_blank" rel="noopener">
       <img src="${heroImg(m.hero_id, true)}" alt="">
       <div><div class="small dim">${i ? "Game before that" : "Last game"} · ${ago(m.start_time + m.duration)}</div>
-      <div class="res ${w ? "win" : "loss"}">${w ? "Won" : "Lost"} · ${esc(heroName(m.hero_id))}${mmr[m.match_id] != null ? " · " + delta(mmr[m.match_id]) + " MMR" : ""}</div>
-      <div>${m.kills}/${m.deaths}/${m.assists} · ${dur(m.duration)} · ${m.gold_per_min} GPM · ${m.last_hits} LH</div>
-      <div class="small dim">${ROLES[m.lane_role] ?? "–"} · ${m.party_size > 1 ? "party of " + m.party_size : "solo"} · lobby ${rankFromAvg(m.average_rank)}</div></div></a>`;
+      <div class="res ${w ? "win" : "loss"}">${w ? "Won" : "Lost"} · ${esc(heroName(m.hero_id))}${mmr[m.match_id] != null ? ` · <span class="nw">${delta(mmr[m.match_id])} MMR</span>` : ""}</div>
+      <div>${dots([`${m.kills}/${m.deaths}/${m.assists}`, dur(m.duration), `${m.gold_per_min} GPM`, `${m.last_hits} LH`])}</div>
+      <div class="small dim">${dots([ROLES[m.lane_role], m.party_size > 1 ? "party of " + m.party_size : "solo", m.average_rank != null && "lobby " + rankFromAvg(m.average_rank)])}</div></div></a>`;
   }).join("") || `<div class="dim">No ranked games found.</div>`;
 
   renderSession();
@@ -291,28 +314,31 @@ function render() {
   renderCharts();
   renderRankHist();
 
-  // splits: role, party, side
-  const split = (label, key) => {
+  // splits: role (only games OpenDota knows the lane for), party, side
+  const split = (label, list, key) => {
     const g = {};
-    for (const m of ranked) { const k = key(m); (g[k] ??= { n: 0, w: 0 }); g[k].n++; g[k].w += won(m); }
-    return Object.entries(g).sort((a, b) => b[1].n - a[1].n)
-      .map(([k, v]) => `<tr><td>${label}</td><td>${k}</td><td>${v.n}</td><td>${v.w}–${v.n - v.w}</td><td>${bar(v.w, v.n)}</td></tr>`).join("");
+    for (const m of list) { const k = key(m); (g[k] ??= { n: 0, w: 0 }); g[k].n++; g[k].w += won(m); }
+    return `<tr class="group"><td colspan="4">${label}</td></tr>` + Object.entries(g).sort((a, b) => b[1].n - a[1].n)
+      .map(([k, v]) => `<tr><td>${k}</td><td>${v.n}</td><td>${v.w}–${v.n - v.w}</td><td>${bar(v.w, v.n)}</td></tr>`).join("");
   };
-  $("splits").innerHTML = `<tr><th></th><th></th><th>Games</th><th>W–L</th><th>Win%</th></tr>` +
-    split("Role", m => ROLES[m.lane_role] ?? "Unknown") +
-    split("Party", m => m.party_size > 1 ? "Party" : "Solo") +
-    split("Side", m => m.player_slot < 128 ? "Radiant" : "Dire") +
-    `<tr><td colspan="5" class="small dim">From your last ${ranked.length} ranked games.</td></tr>`;
+  const laned = ranked.filter(m => ROLES[m.lane_role]);
+  $("splits").innerHTML = `<tr><th></th><th>Games</th><th>W–L</th><th>Win%</th></tr>` +
+    (laned.length ? split(`Role <span class="sub" style="text-transform:none;letter-spacing:0">· known for ${laned.length} of ${ranked.length} games</span>`, laned, m => ROLES[m.lane_role]) : "") +
+    split("Party", ranked, m => m.party_size > 1 ? "Party" : "Solo") +
+    split("Side", ranked, m => m.player_slot < 128 ? "Radiant" : "Dire") +
+    `<tr><td colspan="4" class="small dim">From your last ${ranked.length} ranked games.</td></tr>`;
 
-  $("heroes").innerHTML = `<tr><th>Hero</th><th>Games</th><th>W–L</th><th>Win%</th><th>Last</th></tr>` +
-    heroStats.filter(h => h.games).slice(0, 25).map(h => `<tr><td><img class="hero" src="${heroImg(h.hero_id)}" alt="">${esc(heroName(h.hero_id))}</td>
-      <td>${h.games}</td><td>${h.win}–${h.games - h.win}</td><td>${bar(h.win, h.games)}</td><td class="dim">${ago(h.last_played)}</td></tr>`).join("");
+  $("heroes").innerHTML = `<tr><th>Hero</th><th>Games</th><th class="opt">W–L</th><th>Win%</th><th class="opt">Last</th></tr>` +
+    heroStats.filter(h => h.games).slice(0, 25).map(h => `<tr><td><img class="hero" src="${heroImg(h.hero_id)}" alt=""><span class="hname">${esc(heroName(h.hero_id))}</span></td>
+      <td>${h.games}</td><td class="opt">${h.win}–${h.games - h.win}</td><td>${bar(h.win, h.games)}</td><td class="dim opt">${ago(h.last_played)}</td></tr>`).join("");
 
-  $("peers").innerHTML = peers.length ? `<tr><th>Player</th><th>With</th><th>Win%</th><th>Against</th></tr>` +
+  $("peers").innerHTML = peers.length ? `<tr><th>Player</th><th>Games together</th><th>Win%</th></tr>` +
     peers.slice(0, 15).map(f => `<tr><td><img class="hero" src="${esc(f.avatar)}" alt=""><a href="https://www.opendota.com/players/${Number(f.account_id)}" target="_blank" rel="noopener">${esc(f.personaname)}</a></td>
-      <td>${f.with_games}</td><td>${bar(f.with_win, f.with_games)}</td><td class="dim">${f.against_games ? `${f.against_win}–${f.against_games - f.against_win}` : "–"}</td></tr>`).join("")
+      <td>${f.with_games}</td><td>${bar(f.with_win, f.with_games)}</td></tr>`).join("")
     : `<tr><td class="dim">No party games in the last 6 months.</td></tr>`;
 }
+// join the parts that exist with " · ", each part kept on one line
+const dots = parts => parts.filter(Boolean).map(p => `<span class="nw">${p}</span>`).join(" · ");
 
 // Pair each MMR you logged with the one ranked game that ended since the log before it.
 // pending = the latest logged change when OpenDota hasn't got that game yet. Same rules as mmr_deltas() in rank_overlay.py.
@@ -367,18 +393,19 @@ const bar = (w, n) => `<div class="row" style="gap:6px;flex-wrap:nowrap"><div cl
 
 function renderMatches() {
   const list = mode === "ranked" ? data.ranked.slice(0, 50) : data.all, mmr = mmrByMatch(), start = store.get(sessionKey(), null);
-  $("matches").innerHTML = `<tr><th></th><th>Hero</th><th>Result</th><th>When</th><th>Mode</th><th>K/D/A</th><th>Time</th><th>GPM/XPM</th><th>LH</th><th>Hero dmg</th><th>Tower dmg</th><th>Heal</th><th>Role</th><th>Party</th><th>Lobby</th><th>MMR</th><th></th></tr>` +
+  // Mode only matters in "All modes"; tower damage, healing and lane are on the match page (links)
+  const all = mode === "all", o = ' class="opt"';
+  $("matches").innerHTML = `<tr><th></th><th>Hero</th><th>Result</th><th>MMR</th><th>K/D/A</th><th${o}>When</th>${all ? `<th${o}>Mode</th>` : ""}<th${o}>Time</th><th${o}>GPM/XPM</th><th${o}>LH</th><th${o}>Hero dmg</th><th${o}>Party</th><th${o}>Lobby</th><th${o}></th></tr>` +
     list.map(m => {
       const w = won(m);
       const modeName = (modes[m.game_mode]?.name ?? "").replace("game_mode_", "").replace(/_/g, " ");
-      return `<tr class="${w ? "w" : "l"}${start && m.start_time * 1000 >= start ? " insession" : ""}"><td><button class="flag" data-start="${m.start_time * 1000}" title="Start the session from this game">⚑</button></td><td><img class="hero" src="${heroImg(m.hero_id)}" alt="">${esc(heroName(m.hero_id))}</td>
-        <td class="${w ? "win" : "loss"}">${w ? "Won" : "Lost"}${m.leaver_status ? ' <span class="dim">(abandon)</span>' : ""}</td>
-        <td class="dim">${ago(m.start_time + m.duration)}</td><td class="dim">${m.lobby_type === 7 ? "Ranked " : ""}${esc(modeName)}</td>
-        <td>${m.kills}/${m.deaths}/${m.assists}</td><td>${dur(m.duration)}</td><td>${m.gold_per_min}/${m.xp_per_min}</td><td>${m.last_hits}</td>
-        <td>${(m.hero_damage ?? 0).toLocaleString()}</td><td>${(m.tower_damage ?? 0).toLocaleString()}</td><td>${(m.hero_healing ?? 0).toLocaleString()}</td>
-        <td>${ROLES[m.lane_role] ?? "–"}${m.is_roaming ? " (roam)" : ""}</td><td>${m.party_size > 1 ? m.party_size : "solo"}</td><td>${rankFromAvg(m.average_rank)}</td><td>${delta(mmr[m.match_id])}</td>
-        <td><a href="https://www.opendota.com/matches/${m.match_id}" target="_blank" rel="noopener">OpenDota</a> · <a href="https://stratz.com/matches/${m.match_id}" target="_blank" rel="noopener">Stratz</a></td></tr>`;
-    }).join("");
+      return `<tr class="${w ? "w" : "l"}${start && m.start_time * 1000 >= start ? " insession" : ""}"><td><button class="flag" data-start="${m.start_time * 1000}" title="Start the session from this game">⚑</button></td><td><img class="hero" src="${heroImg(m.hero_id)}" alt=""><span class="hname">${esc(heroName(m.hero_id))}</span></td>
+        <td class="${w ? "win" : "loss"}" ${m.leaver_status ? 'title="Someone abandoned"' : ""}>${w ? "Won" : "Lost"}${m.leaver_status ? '<span class="dim">*</span>' : ""}</td><td>${delta(mmr[m.match_id])}</td>
+        <td>${m.kills}/${m.deaths}/${m.assists}</td><td class="dim opt">${ago(m.start_time + m.duration)}</td>${all ? `<td class="dim opt">${m.lobby_type === 7 ? "Ranked " : ""}${esc(modeName)}</td>` : ""}
+        <td${o}>${dur(m.duration)}</td><td${o}>${m.gold_per_min}/${m.xp_per_min}</td><td${o}>${m.last_hits}</td>
+        <td${o}>${(m.hero_damage ?? 0).toLocaleString()}</td><td${o}>${m.party_size > 1 ? m.party_size : "solo"}</td><td${o}>${rankFromAvg(m.average_rank)}</td>
+        <td${o}><a href="https://www.opendota.com/matches/${m.match_id}" target="_blank" rel="noopener">OpenDota</a> · <a href="https://stratz.com/matches/${m.match_id}" target="_blank" rel="noopener">Stratz</a></td></tr>`;
+    }).join("") + (list.some(m => m.leaver_status) ? `<tr><td colspan="14" class="small dim">* someone abandoned that game</td></tr>` : "");
 }
 
 function chart(id, cfg) {
@@ -399,8 +426,12 @@ function renderCharts() {
   const withRank = games.filter(m => m.average_rank != null);
   $("lobbyChart").classList.toggle("hidden", !withRank.length);
   $("lobbyNote").textContent = withRank.length ? "Going up = you're being matched with higher players." : "OpenDota has no lobby medal for these games.";
+  // single lobbies jump around a lot; a 5-game average shows the trend, faint dots keep the raw games
+  const raw = withRank.map(m => m.average_rank);
+  const smooth = raw.map((_, i) => { const s = raw.slice(Math.max(0, i - 4), i + 1); return s.reduce((a, b) => a + b) / s.length; });
   chart("lobbyChart", { type: "line", data: { labels: withRank.map(m => new Date(m.start_time * 1000).toLocaleDateString()),
-      datasets: [{ data: withRank.map(m => m.average_rank), borderColor: "#4cc26b", pointRadius: 2, tension: .3 }] },
+      datasets: [{ data: smooth, borderColor: "#4cc26b", borderWidth: 2.5, pointRadius: 0, tension: .35 },
+                 { data: raw, showLine: false, pointRadius: 2, pointBackgroundColor: "rgba(76,194,107,.25)", pointBorderWidth: 0 }] },
     options: { plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => rankFromAvg(c.raw) } } },
       // label only medal boundaries (Legend 1, Ancient 1, ...): in-between numbers like 68 aren't real medals
       scales: { ...axes, y: { ...axes.y, grid: { color: c => c.tick?.value % 10 === 1 ? "#262c36" : "transparent" },
@@ -411,20 +442,19 @@ function renderRankHist() {
   const id = accountId();
   const hist = store.get("dota.rankHist." + id, []);
   const mmr = store.get("dota.mmr." + id, []);
-  const rows = [
-    ...hist.map(h => ({ t: h.t, what: rankName(h.tier) + (h.lb ? ` #${h.lb}` : ""), kind: "Medal" })),
-    ...mmr.map((h, i) => ({ t: h.t, what: h.mmr + (i ? ` (${h.mmr - mmr[i - 1].mmr >= 0 ? "+" : ""}${h.mmr - mmr[i - 1].mmr})` : ""), kind: "MMR" })),
-  ].sort((a, b) => b.t - a.t);
-  // ranked W–L since the last MMR you logged
+  const when = t => new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  // games played since the last log have no +/- yet: say so, so the user knows to log
   const lastMmr = mmr[mmr.length - 1];
   const since = lastMmr ? data.ranked.filter(m => (m.start_time + m.duration) * 1000 > lastMmr.t) : [];
-  const ws = since.filter(won).length;
-  $("rankHist").innerHTML = (lastMmr ? `<tr><td colspan="3" class="small">Since you logged ${lastMmr.mmr}: <b>${ws}–${since.length - ws}</b> in ranked</td></tr>` : "") +
-    `<tr><th>When</th><th>What</th><th>Value</th></tr>` +
-    rows.map(r => `<tr><td class="dim">${new Date(r.t).toLocaleString()}</td><td>${r.kind}</td><td>${esc(r.what)}</td></tr>`).join("");
+  $("sinceLog").innerHTML = !lastMmr ? `<span class="dim">No MMR logged yet.</span>`
+    : since.length ? `<span class="gold">${since.length} ranked game${since.length === 1 ? "" : "s"} since your last log (${lastMmr.mmr}). Log your MMR to see the +/-.</span>`
+    : `<span class="dim">Up to date: last logged ${lastMmr.mmr} on ${when(lastMmr.t)}.</span>`;
+  $("rankHist").innerHTML = mmr.length ? `<tr><th>When</th><th>MMR</th><th>Change</th></tr>` +
+    mmr.map((h, i) => `<tr><td class="dim">${when(h.t)}</td><td>${h.mmr}</td><td>${i ? delta(h.mmr - mmr[i - 1].mmr) : delta(null)}</td></tr>`).reverse().join("") : "";
+  $("medalHist").textContent = hist.length ? "Medal changes seen: " + hist.slice(-6).reverse().map(h => `${rankName(h.tier)}${h.lb ? ` #${h.lb}` : ""} (${when(h.t)})`).join(" ← ") : "";
   $("mmrChart").classList.toggle("hidden", mmr.length < 2 || !window.Chart);
   if (mmr.length >= 2 && window.Chart) chart("mmrChart", { type: "line",
-    data: { labels: mmr.map(h => new Date(h.t).toLocaleDateString()), datasets: [{ data: mmr.map(h => h.mmr), borderColor: "#c23b2a", pointRadius: 3 }] },
+    data: { labels: mmr.map(h => when(h.t)), datasets: [{ data: mmr.map(h => h.mmr), borderColor: "#c23b2a", pointRadius: 3 }] },
     options: { plugins: { legend: { display: false } }, scales: axes } });
 }
 
