@@ -23,19 +23,19 @@ Windows may say "Windows protected your PC" because the exe isn't signed. Click 
 |---|---|
 | **Click** the widget | Opens the full stats window |
 | **Drag** the widget | Moves it (position is remembered) |
-| **Right-click** the widget or the tray icon | Menu: log MMR, start/end session, check for new games, change account, quit |
+| **Right-click** the widget or the tray icon | Menu: log MMR, set MMR screen area, start/end session, check for new games, change account, quit |
 | **Ctrl+Shift+R** | Hide / show the widget |
-| **Ctrl+Shift+M** | Log your MMR |
+| **Ctrl+Shift+M** | Read your MMR off the screen (or type it) |
 
 ### MMR +/- per game
 
-Valve doesn't let outside apps see MMR changes. That's why Dota Plus is the only place that shows them, and it often lags. This app gets around that like this:
+Valve doesn't let outside apps see MMR changes. That's why Dota Plus is the only place that shows them, and it often lags. This app reads your MMR straight off Dota's screen instead (Windows' built-in text reader, nothing to install):
 
-1. After a ranked game, open **Dota → Profile → Stats**. Your exact MMR is shown there.
-2. Press **Ctrl+Shift+M** and type it.
+1. **Once:** open **Dota → Profile → Stats**. Your MMR is in the top right. Press **Ctrl+Shift+M**, drag a box around the number, and press Enter to confirm what it read.
+2. **After every ranked game:** just open Profile → Stats again. While Dota is in front, the app checks that box every few seconds and logs the new MMR by itself. No typing.
 3. The widget shows the +/- under that game at once. If OpenDota hasn't picked up the game yet, it appears as a dashed box first and becomes a normal box when it arrives.
 
-If you mistype, log again within 10 minutes and it replaces the last entry. If you play two games without logging, those two can't be split. They still count for W–L, but get no +/-.
+Changed resolution or the number moved? Right-click → **Set MMR screen area…**. If a reading is off, press Ctrl+Shift+M and fix the number; a re-log within 10 minutes replaces the last entry. To stay safe, an auto-read only counts if two reads in a row agree and it's within 300 of your last MMR. The widget doesn't show up in screenshots, so it can sit on top of the number. If you play two games without logging, those two can't be split. They still count for W–L, but get no +/-.
 
 ### Sessions
 
@@ -45,13 +45,14 @@ If you mistype, log again within 10 minutes and it replaces the last entry. If y
 
 ### What the big window shows
 
-Medal, leaderboard spot, OpenDota's MMR estimate, ranked W–L (all time, last 20, today, last 7 days), streak, average medal of your lobbies, KDA, GPM/XPM, hero damage, game length, your last 2 games, ranked form chart, lobby medal over time, full match history (hero, KDA, GPM/XPM, last hits, damage, healing, role, party, lobby medal, MMR +/-, links to OpenDota/Stratz), MMR history, win rate by role/party/side, heroes and the people you queue with.
+Medal, leaderboard spot, OpenDota's MMR estimate, ranked W–L (all time, last 20, today, last 7 days), streak, average medal of your lobbies, KDA, GPM/XPM, hero damage, game length, your last 2 games, ranked form chart, lobby medal over time, full match history (hero, result, MMR +/-, KDA, GPM/XPM, last hits, damage, party, lobby medal, links to OpenDota/Stratz), MMR history, win rate by role/party/side, heroes and the people you queue with.
 
 `index.html` also works on its own: double-click it to open it in a browser.
 
 ## Where data comes from
 
 - Games and rank: [OpenDota](https://www.opendota.com) API (free, public data only). The app asks OpenDota to fetch your newest games every 3 minutes.
+- Your MMR: read on your own PC from Dota's screen (only the box you picked). No game memory, no Steam login.
 - Your settings and MMR log: `%APPDATA%\DotaRankTracker\` on your own PC. Nothing is uploaded anywhere.
 
 ## Build it yourself

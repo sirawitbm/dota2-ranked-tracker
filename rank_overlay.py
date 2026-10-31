@@ -1,8 +1,10 @@
 """Dota Rank Tracker: a small always-on-top widget with your medal and last
 5 ranked results. Click it for the full stats window. Ctrl+Shift+R hides
 and shows the widget; Ctrl+Shift+M logs your MMR so each game gets its +/-.
+It can also read your MMR off Dota's Profile → Stats page by itself (Windows OCR).
 Data comes from OpenDota (needs Expose Public Match Data on in Dota)."""
 
+import asyncio
 import ctypes
 import json
 import os
@@ -14,9 +16,9 @@ import urllib.request
 from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon,
-                           QPainter, QPainterPath, QPen, QPixmap)
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon,
+                           QImage, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QInputDialog, QMenu, QSpinBox,
@@ -33,6 +35,15 @@ SETTINGS = DATA_DIR / "settings.json"
 POLL_MS = 3 * 60 * 1000
 RETYPE_MS = 10 * 60 * 1000  # no ranked game ends this fast, so a re-log this soon is a typo fix
 HOTKEYS = {1: 0x52, 2: 0x4D}  # id -> key: Ctrl+Shift+R hide/show, Ctrl+Shift+M log MMR
+READ_MS = 4000  # how often the MMR area is read while Dota is in front
+MAX_JUMP = 300  # an auto-read further than this from the last log is a misread (~10 games)
+
+try:  # Windows' own OCR, no extra install
+    from winrt.windows.graphics.imaging import BitmapPixelFormat, SoftwareBitmap
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.storage.streams import DataWriter
+except ImportError:
+    OcrEngine = None
 
 # menu and dialogs in the widget's colours instead of the plain Windows look
 STYLE = """
@@ -125,6 +136,21 @@ def add_log(log, mmr, now_ms):
     return log + [{"t": now_ms, "mmr": mmr}]
 
 
+def number(text):
+    """The one number in OCR text ("4,002" or "MMR 4002" -> 4002). None if there is no
+    number or several (in-game K/D/A "5/3/10", clock "12:34")."""
+    found = re.findall(r"\d+(?:[,. ]\d{3})*", text)
+    digits = re.sub(r"\D", "", found[0]) if len(found) == 1 else ""
+    return int(digits) if 0 < len(digits) <= 5 else None  # MMR never has 6 digits
+
+
+def accept(log, value, prev):
+    """Log an auto-read only if two reads in a row agree, it changed, and it's a believable jump."""
+    if value is None or value != prev or not log:
+        return False
+    return value != log[-1]["mmr"] and abs(value - log[-1]["mmr"]) <= MAX_JUMP
+
+
 def session_summary(start, matches, log):
     """Ranked games that started at/after start (ms): (wins, losses, mmr total, games with a known +/-).
     Same rules as sessionSummary() in index.html."""
@@ -147,6 +173,9 @@ if os.name == "nt":
     U.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                ctypes.c_int, ctypes.c_int, wintypes.UINT)
     U.SetWindowPos.restype = wintypes.BOOL
+    U.GetForegroundWindow.restype = wintypes.HWND
+    U.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    U.SetWindowDisplayAffinity.argtypes = (wintypes.HWND, wintypes.DWORD)
     K = ctypes.WinDLL("kernel32", use_last_error=True)
     K.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
     K.CreateMutexW.restype = wintypes.HANDLE
@@ -166,6 +195,19 @@ def dark_title_bar(hwnd):
     if os.name == "nt" and DWM:
         on = ctypes.c_int(1)
         DWM.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
+
+
+def hide_from_capture(hwnd):
+    if os.name == "nt":  # WDA_EXCLUDEFROMCAPTURE: our MMR reads see Dota, not the widget on top of it
+        U.SetWindowDisplayAffinity(hwnd, 0x11)
+
+
+def dota_in_front():
+    if os.name != "nt":
+        return False
+    buf = ctypes.create_unicode_buffer(64)
+    U.GetWindowTextW(U.GetForegroundWindow(), buf, 64)
+    return buf.value == "Dota 2"
 
 
 def single_instance():
@@ -217,6 +259,111 @@ class Fetcher(QObject):
             self.done.emit({"account": account, "player": player, "matches": matches, "icons": icons})
         except Exception as e:  # network down, OpenDota 5xx, etc. - keep the last good data
             self.done.emit({"account": account, "error": str(e)})
+
+
+# --- reading your MMR off Dota's screen -------------------------------------
+
+def grab(qt, area):
+    """Screenshot of a global screen box [x, y, w, h] as a QImage."""
+    x, y, w, h = area
+    s = qt.screenAt(QPoint(x + w // 2, y + h // 2)) or qt.primaryScreen()
+    g = s.geometry()
+    return s.grabWindow(0, x - g.x(), y - g.y(), w, h).toImage()
+
+
+async def _recognize(engine, bmp):
+    return await engine.recognize_async(bmp)
+
+
+def stretched(img):
+    """Grey, darkest pixel -> black, brightest -> white."""
+    g = img.convertToFormat(QImage.Format_Grayscale8)
+    px = bytes(g.constBits())
+    lo, hi = min(px), max(px)
+    px = px.translate(bytes(max(0, min(255, (v - lo) * 255 // max(hi - lo, 1))) for v in range(256)))
+    return QImage(px, g.width(), g.height(), g.bytesPerLine(), QImage.Format_Grayscale8).copy()
+
+
+def ocr(engine, img):
+    k = max(1, min(3, 1500 // max(img.width(), img.height(), 1)))  # small UI text reads better bigger
+    img = img.scaled(img.width() * k, img.height() * k, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    img = img.convertToFormat(QImage.Format_ARGB32)  # = BGRA bytes on little-endian
+    w = DataWriter()
+    w.write_bytes(bytes(img.constBits()))
+    bmp = SoftwareBitmap.create_copy_from_buffer(w.detach_buffer(), BitmapPixelFormat.BGRA8,
+                                                 img.width(), img.height())
+    return number(asyncio.run(_recognize(engine, bmp)).text)
+
+
+def read_number(img):
+    """The MMR in a screenshot via Windows OCR, or None. ~5 ms; safe off the UI thread."""
+    try:
+        engine = OcrEngine and OcrEngine.try_create_from_user_profile_languages()
+        if not engine:
+            return None
+        # coloured text on dark can fail as-is but reads once stretched (and the other way round)
+        v = ocr(engine, img)
+        return v if v is not None else ocr(engine, stretched(img))
+    except Exception:  # OCR language missing, odd image, ... - just no reading this time
+        return None
+
+
+class Reader(QObject):
+    done = Signal(object)
+
+    def run(self, img):
+        threading.Thread(target=lambda: self.done.emit(read_number(img)), daemon=True).start()
+
+
+class AreaPicker(QWidget):
+    """A frozen screenshot of the screen under the mouse; drag a box around your MMR."""
+
+    def __init__(self, qt, on_pick):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        screen = qt.screenAt(QCursor.pos()) or qt.primaryScreen()
+        self.shot = screen.grabWindow(0)
+        self.on_pick, self.start, self.box = on_pick, None, QRect()
+        self.setGeometry(screen.geometry())
+        self.setCursor(Qt.CrossCursor)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.drawPixmap(self.rect(), self.shot)
+        dim, hole = QPainterPath(), QPainterPath()
+        dim.addRect(QRectF(self.rect()))
+        hole.addRect(QRectF(self.box))
+        p.fillPath(dim.subtracted(hole), QColor(0, 0, 0, 150))
+        p.setPen(QPen(GOLD, 2))
+        p.drawRect(self.box)
+        p.setFont(QFont("Segoe UI", 12, QFont.DemiBold))
+        hint = "Drag a box around your MMR number  (Dota → Profile → Stats, top right)\nEsc to type it instead"
+        r = p.fontMetrics().boundingRect(self.rect(), Qt.AlignHCenter, hint).adjusted(-18, -10, 18, 10)
+        r.moveTop(40)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor("#171b22"))
+        p.setPen(QPen(LINE, 1))
+        p.drawRoundedRect(r, 10, 10)
+        p.setPen(TEXT)
+        p.drawText(r, Qt.AlignCenter, hint)
+
+    def mousePressEvent(self, e):
+        self.start = e.position().toPoint()
+
+    def mouseMoveEvent(self, e):
+        if self.start:
+            self.box = QRect(self.start, e.position().toPoint()).normalized()
+            self.update()
+
+    def mouseReleaseEvent(self, _):
+        if self.box.width() >= 8 and self.box.height() >= 6:
+            self.close()
+            g = self.geometry()
+            self.on_pick([self.box.x() + g.x(), self.box.y() + g.y(), self.box.width(), self.box.height()])
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+            self.on_pick(None)
 
 
 # --- the small widget ------------------------------------------------------
@@ -483,6 +630,9 @@ class App:
         self.fetcher.done.connect(self.on_data)
         self.busy = False
         self.asking = False
+        self.reader = Reader()
+        self.reader.done.connect(self.on_read)
+        self.reading, self.last_read = False, None
 
         self.menu = QMenu()  # rounded corners need a see-through, frameless popup
         self.menu.setAttribute(Qt.WA_TranslucentBackground)
@@ -492,6 +642,8 @@ class App:
         self.menu.addAction(self.toggle_act)
         self.menu.addAction(QAction("Open full stats", self.menu, triggered=self.open_stats))
         self.menu.addAction(QAction("Log MMR…\tCtrl+Shift+M", self.menu, triggered=self.log_mmr))
+        if OcrEngine:
+            self.menu.addAction(QAction("Set MMR screen area…", self.menu, triggered=self.pick_area))
         self.menu.addAction(self.session_act)
         self.menu.addAction(QAction("Check for new games now", self.menu, triggered=lambda: self.poll(True)))
         self.menu.addAction(QAction("Change account…", self.menu, triggered=self.ask_account))
@@ -510,6 +662,7 @@ class App:
         self.place()
         self.overlay.show()
         hwnd = int(self.overlay.winId())
+        hide_from_capture(hwnd)
         taken = [chr(vk) for hid, vk in HOTKEYS.items()
                  if os.name == "nt" and not U.RegisterHotKey(hwnd, hid, 0x0002 | 0x0004 | 0x4000, vk)]
         if taken:
@@ -524,6 +677,8 @@ class App:
         # Dota borderless can push itself above us; re-assert topmost now and then
         self.top_timer = QTimer(timeout=lambda: self.overlay.isVisible() and pin_topmost(int(self.overlay.winId())))
         self.top_timer.start(5000)
+        self.read_timer = QTimer(timeout=self.auto_read)
+        self.read_timer.start(READ_MS)
         self.poll(False)
 
     def place(self):
@@ -579,16 +734,59 @@ class App:
         if self.stats:
             self.stats.push(self.settings["account"], self.mmr_log(), self.session_start())
 
+    def save_mmr(self, value):
+        self.settings.setdefault("mmr", {})[self.settings["account"]] = add_log(
+            self.mmr_log(), value, int(time.time() * 1000))
+        self._changed()
+
+    def auto_read(self):
+        area = self.settings.get("mmr_area")
+        if area and OcrEngine and not self.reading and not self.asking and dota_in_front():
+            self.reading = True
+            self.reader.run(grab(self.qt, area))
+
+    def on_read(self, value):
+        self.reading = False
+        if accept(self.mmr_log(), value, self.last_read):
+            self.save_mmr(value)
+        self.last_read = value
+
     def log_mmr(self):
+        """Hotkey/menu: read the MMR area and confirm it, or pick the area first, or just type."""
+        if self.asking:
+            return
+        area = self.settings.get("mmr_area")
+        if not area and OcrEngine:
+            self.pick_area()
+        else:
+            self.ask_mmr(area and read_number(grab(self.qt, area)))
+
+    def pick_area(self):
+        if self.asking:
+            return
+        self.asking = True
+        self.picker = AreaPicker(self.qt, self.on_pick)
+        self.picker.show()
+        self.picker.activateWindow()
+
+    def on_pick(self, area):
+        self.asking = False
+        if area:
+            self.settings["mmr_area"] = area
+            save_settings(self.settings)
+        QTimer.singleShot(0, lambda: self.ask_mmr(area and read_number(grab(self.qt, area))))
+
+    def ask_mmr(self, read):
         if self.asking:
             return
         self.asking = True
         try:
             log = self.mmr_log()
-            d = dialog("Log MMR", "Your MMR now  (Dota → Profile → Stats)")
+            d = dialog("Log MMR", "Read from your screen - press Enter if it's right" if read is not None
+                       else "Your MMR now  (Dota → Profile → Stats)")
             d.setInputMode(QInputDialog.IntInput)
             d.setIntRange(0, 20000)
-            d.setIntValue(log[-1]["mmr"] if log else 3000)
+            d.setIntValue(read if read is not None else log[-1]["mmr"] if log else 3000)
             if spin := d.findChild(QSpinBox):
                 spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
             ok = d.exec()
@@ -596,8 +794,8 @@ class App:
         finally:
             self.asking = False
         if ok:
-            self.settings.setdefault("mmr", {})[self.settings["account"]] = add_log(log, value, int(time.time() * 1000))
-            self._changed()
+            self.save_mmr(value)
+            self.last_read = value
 
     def set_session(self, start):
         self.settings.setdefault("session", {})[self.settings["account"]] = start
