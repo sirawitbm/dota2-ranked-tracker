@@ -23,19 +23,21 @@ Windows may say "Windows protected your PC" because the exe isn't signed. Click 
 |---|---|
 | **Click** the widget | Opens the full stats window |
 | **Drag** the widget | Moves it (position is remembered) |
-| **Right-click** the widget or the tray icon | Menu: log MMR, set MMR screen area, start/end session, check for new games, change account, quit |
+| **Right-click** the widget or the tray icon | Menu: capture MMR, set MMR screen area, start/end session, check for new games, change account, quit |
 | **Ctrl+Shift+R** | Hide / show the widget |
-| **Ctrl+Shift+M** | Read your MMR off the screen (or type it) |
+| **Ctrl+Shift+E** | Capture your MMR off Dota's screen |
 
 ### MMR +/- per game
 
-Valve doesn't let outside apps see MMR changes. That's why Dota Plus is the only place that shows them, and it often lags. This app reads your MMR straight off Dota's screen instead (Windows' built-in text reader, nothing to install):
+Valve doesn't let outside apps see MMR changes. That's why Dota Plus is the only place that shows them, and it often lags. This app reads your MMR straight off Dota's screen instead, with [RapidOCR](https://github.com/RapidAI/RapidOCR). It's an offline text reader built into the app, and it got 400 out of 400 test numbers right in Dota's own font.
 
-1. **Once:** open **Dota → Profile → Stats**. Your MMR is in the top right. Press **Ctrl+Shift+M**, drag a box around the number, and press Enter to confirm what it read.
-2. **After every ranked game:** just open Profile → Stats again. While Dota is in front, the app checks that box every few seconds and logs the new MMR by itself. No typing.
-3. The widget shows the +/- under that game at once. If OpenDota hasn't picked up the game yet, it appears as a dashed box first and becomes a normal box when it arrives.
+1. **Once:** open **Dota → Profile** (Stats or History). Your MMR is in the top right. Press **Ctrl+Shift+E** and drag a box around the number. That's the whole setup.
+2. **After each ranked game:** open Profile again. The app logs your new MMR by itself within a few seconds, or press **Ctrl+Shift+E** to capture it right away. You never type or confirm anything.
+3. The widget shows your current MMR under the medal, so you can see that it read the right number. The +/- appears under that game. If OpenDota hasn't picked up the game yet, it shows as a dashed box until it arrives.
 
-Changed resolution or the number moved? Right-click → **Set MMR screen area…**. If a reading is off, press Ctrl+Shift+M and fix the number; a re-log within 10 minutes replaces the last entry. To stay safe, an auto-read only counts if two reads in a row agree and it's within 300 of your last MMR. The widget doesn't show up in screenshots, so it can sit on top of the number. If you play two games without logging, those two can't be split. They still count for W–L, but get no +/-.
+**Wrong number?** Open the big window → **MMR history**. Click the number to fix it, or press **×** to delete it.
+
+Changed resolution, or the number moved? Right-click → **Set MMR screen area…**. The app only reads the box when the screen there is standing still (a menu, not the game), and an automatic read only counts if it's within 300 of your last MMR. The widget doesn't show up in screenshots, so it can sit on top of the number. If you play two games without logging, they can't be split. They still count for W–L, but get no +/-.
 
 ### Sessions
 

@@ -1,5 +1,5 @@
 """Run: python test_rank_overlay.py (no Qt window opens)."""
-from rank_overlay import add_log, mmr_deltas, parse_id, rank_name, session_summary, number, accept
+from rank_overlay import add_log, mmr_deltas, parse_id, rank_name, session_summary, number, accept, same
 
 assert parse_id("https://steamcommunity.com/profiles/76561197960278073") == "12345"
 assert parse_id("https://www.dotabuff.com/players/1234567") == "1234567"
@@ -38,8 +38,12 @@ assert session_summary(0, [game(5, 4000), game(2, 2500, False), game(1, 1500)], 
 # OCR text -> MMR: one number only (in-game K/D/A or the clock must not count)
 assert number("4,002") == 4002 and number("MMR 4002") == 4002 and number("12 345") == 12345
 assert number("513110") is None and number("5/3/10") is None and number("12:34") is None and number("") is None
-# auto-read logs only a stable, changed, believable reading
+# auto-read logs only a changed, believable reading, and never starts the log
 L = [{"t": 0, "mmr": 4000}]
-assert accept(L, 4025, 4025) and not accept(L, 4025, 3975) and not accept(L, 4000, 4000)
-assert not accept(L, 4400, 4400) and not accept([], 4025, 4025) and not accept(L, None, None)
+assert accept(L, 4025) and accept(L, 3975) and not accept(L, 4000)
+assert not accept(L, 4400) and not accept([], 4025) and not accept(L, None)
+# the MMR box counts as "still" when its thumbnail barely changes
+assert same(b" ", b"") and not same(b" ", b"@") and not same(b"", None)
+# Dota writes "5,404"; OCR may give "5.404" and the label too
+assert number("5,404 MMR") == 5404 and number("5.404") == 5404
 print("ok")
