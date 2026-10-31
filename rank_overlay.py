@@ -1,0 +1,634 @@
+"""Dota Rank Tracker: a small always-on-top widget with your medal and last
+5 ranked results. Click it for the full stats window. Ctrl+Shift+R hides
+and shows the widget; Ctrl+Shift+M logs your MMR so each game gets its +/-.
+Data comes from OpenDota (needs Expose Public Match Data on in Dota)."""
+
+import ctypes
+import json
+import os
+import re
+import sys
+import threading
+import time
+import urllib.request
+from ctypes import wintypes
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont, QFontMetrics, QIcon,
+                           QPainter, QPainterPath, QPen, QPixmap)
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import (QApplication, QInputDialog, QMenu, QSystemTrayIcon,
+                               QWidget)
+
+API = "https://api.opendota.com/api"
+ICONS = "https://www.opendota.com/assets/images/dota2/rank_icons"
+RANKS = ["", "Herald", "Guardian", "Crusader", "Archon", "Legend", "Ancient", "Divine", "Immortal"]
+HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DotaRankTracker"
+SETTINGS = DATA_DIR / "settings.json"
+# ponytail: fixed 3 min poll = 3 calls (refresh + 2 reads) -> ~60/hour, fine for a gaming
+# session under OpenDota's 3000/day free limit; back off when idle if people run it 24/7
+POLL_MS = 3 * 60 * 1000
+RETYPE_MS = 10 * 60 * 1000  # no ranked game ends this fast, so a re-log this soon is a typo fix
+HOTKEYS = {1: 0x52, 2: 0x4D}  # id -> key: Ctrl+Shift+R hide/show, Ctrl+Shift+M log MMR
+
+WIN, LOSS, BG, LINE, TEXT, DIM, GOLD = (QColor("#4cc26b"), QColor("#e0533f"), QColor(14, 17, 22, 225),
+                                        QColor("#2c333e"), QColor("#e6e8eb"), QColor("#8b93a1"), QColor("#d9a441"))
+
+
+# --- settings / ids -------------------------------------------------------
+
+def load_settings():
+    try:
+        s = json.loads(SETTINGS.read_text("utf-8"))
+        if isinstance(s, dict):
+            return s
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        pass
+    # unreadable: keep a copy instead of silently overwriting the MMR log
+    try:
+        os.replace(SETTINGS, SETTINGS.with_name("settings.bad.json"))
+    except OSError:
+        pass
+    return {}
+
+
+def save_settings(s):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s), "utf-8")
+    os.replace(tmp, SETTINGS)  # atomic: a crash mid-save never leaves a half-written file
+
+
+def parse_id(text):
+    """Friend id, steamid64, or a Steam/OpenDota/Dotabuff/Stratz link -> friend id."""
+    text = text.strip()
+    big = re.search(r"7656\d{13}", text)
+    if big:
+        return str(int(big.group()) - 76561197960265728)
+    m = re.search(r"(\d{3,10})/?$", text) or re.search(r"players/(\d+)", text)
+    return m.group(1) if m else None
+
+
+def rank_name(tier):
+    if not tier:
+        return "Uncalibrated"
+    return "Immortal" if tier >= 80 else f"{RANKS[tier // 10]} {tier % 10}"
+
+
+def won(m):
+    return (m["player_slot"] < 128) == m["radiant_win"]
+
+
+def mmr_deltas(log, matches):
+    """Valve doesn't share per-game MMR, so we pair the MMR you log with the one
+    ranked game that ended since your previous log. Returns ({match_id: delta},
+    pending, pending_t) where pending is the latest delta OpenDota has no game for
+    yet. Same rules as mmrInfo() in index.html."""
+    by_match, pending, pending_t = {}, None, None
+    for prev, cur in zip(log, log[1:]):
+        games = [m for m in matches if prev["t"] < (m["start_time"] + m["duration"]) * 1000 < cur["t"]]
+        if len(games) == 1:
+            by_match[games[0]["match_id"]] = cur["mmr"] - prev["mmr"]
+        elif not games and cur is log[-1] and cur["mmr"] != prev["mmr"]:
+            pending, pending_t = cur["mmr"] - prev["mmr"], cur["t"]
+    return by_match, pending, pending_t
+
+
+def add_log(log, mmr, now_ms):
+    """Append an MMR entry; a re-log within RETYPE_MS replaces the last one (typo fix)."""
+    if log and now_ms - log[-1]["t"] < RETYPE_MS:
+        log = log[:-1]
+    return log + [{"t": now_ms, "mmr": mmr}]
+
+
+def session_summary(start, matches, log):
+    """Ranked games that started at/after start (ms): (wins, losses, mmr total, games with a known +/-).
+    Same rules as sessionSummary() in index.html."""
+    by_match, pending, pending_t = mmr_deltas(log, matches)
+    games = [m for m in matches if m["start_time"] * 1000 >= start]
+    wins, n = sum(map(won, games)), len(games)
+    known = [by_match[m["match_id"]] for m in games if m["match_id"] in by_match]
+    if pending and pending_t >= start:  # a game you logged that OpenDota hasn't got yet
+        n, wins = n + 1, wins + (pending > 0)
+        known.append(pending)
+    return wins, n - wins, sum(known), len(known)
+
+
+# --- Windows bits (signatures declared; undeclared ctypes calls fail silently on 64-bit) ---
+
+if os.name == "nt":
+    U = ctypes.WinDLL("user32", use_last_error=True)
+    U.RegisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT)
+    U.RegisterHotKey.restype = wintypes.BOOL
+    U.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, wintypes.UINT)
+    U.SetWindowPos.restype = wintypes.BOOL
+    K = ctypes.WinDLL("kernel32", use_last_error=True)
+    K.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    K.CreateMutexW.restype = wintypes.HANDLE
+    try:
+        DWM = ctypes.WinDLL("dwmapi")
+        DWM.DwmSetWindowAttribute.argtypes = (wintypes.HWND, wintypes.DWORD, wintypes.LPCVOID, wintypes.DWORD)
+    except OSError:
+        DWM = None
+
+
+def pin_topmost(hwnd):
+    if os.name == "nt":  # HWND_TOPMOST, NOMOVE|NOSIZE|NOACTIVATE: stay on top without stealing focus
+        U.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010)
+
+
+def dark_title_bar(hwnd):
+    if os.name == "nt" and DWM:
+        on = ctypes.c_int(1)
+        DWM.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
+
+
+def single_instance():
+    if os.name != "nt":
+        return True
+    K.CreateMutexW(None, False, "Local\\DotaRankTracker")
+    return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
+
+
+# --- OpenDota fetch, off the UI thread -------------------------------------
+
+def get(path, method="GET"):
+    req = urllib.request.Request(API + path, method=method, headers={"User-Agent": "DotaRankTracker"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read() or b"null")
+
+
+_icons = {}  # medal pngs by url; only one fetch runs at a time
+
+
+def icon(url):
+    if url not in _icons:
+        req = urllib.request.Request(url, headers={"User-Agent": "DotaRankTracker"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            _icons[url] = r.read()
+    return _icons[url]
+
+
+class Fetcher(QObject):
+    done = Signal(object)
+
+    def run(self, account, ask_refresh):
+        threading.Thread(target=self._work, args=(account, ask_refresh), daemon=True).start()
+
+    def _work(self, account, ask_refresh):
+        try:
+            if ask_refresh:  # tell OpenDota to pull our newest games from Steam
+                get(f"/players/{account}/refresh", "POST")
+                time.sleep(20)
+            player = get(f"/players/{account}")
+            matches = get(f"/players/{account}/matches?lobby_type=7&limit=40"
+                          "&project=start_time&project=duration&project=hero_id")
+            tier = player.get("rank_tier")
+            icons = []
+            if tier:
+                icons.append(icon(f"{ICONS}/rank_icon_{tier // 10}.png"))
+                if tier % 10:
+                    icons.append(icon(f"{ICONS}/rank_star_{tier % 10}.png"))
+            self.done.emit({"account": account, "player": player, "matches": matches, "icons": icons})
+        except Exception as e:  # network down, OpenDota 5xx, etc. - keep the last good data
+            self.done.emit({"account": account, "error": str(e)})
+
+
+# --- the small widget ------------------------------------------------------
+
+class Overlay(QWidget):
+    W, H = 248, 78
+
+    def __init__(self, app):
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+                         | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint)
+        self.app = app
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.PointingHandCursor)
+        self.medal = None
+        self.state = None  # last good data
+        self.error = None
+        self.new_match = None  # newest box gets a highlight ring until clicked
+        self._press = None
+
+    # click opens stats, drag moves
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._press = (e.globalPosition().toPoint(), self.pos(), False)
+        elif e.button() == Qt.RightButton:
+            self.app.menu.popup(e.globalPosition().toPoint())
+
+    def mouseMoveEvent(self, e):
+        if not self._press:
+            return
+        start, origin, dragging = self._press
+        delta = e.globalPosition().toPoint() - start
+        if dragging or delta.manhattanLength() > 4:
+            self._press = (start, origin, True)
+            self.move(origin + delta)
+
+    def mouseReleaseEvent(self, e):
+        if self._press and e.button() == Qt.LeftButton:
+            if self._press[2]:
+                self.app.settings["pos"] = [self.x(), self.y()]
+                save_settings(self.app.settings)
+            else:
+                self.new_match = None
+                self.update()
+                self.app.open_stats()
+        self._press = None
+
+    def nativeEvent(self, event_type, message):
+        if os.name == "nt" and event_type == b"windows_generic_MSG":
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0312 and msg.wParam in HOTKEYS:  # WM_HOTKEY
+                # run after this native handler returns; a dialog's event loop must not nest in here
+                QTimer.singleShot(0, self.app.toggle_overlay if msg.wParam == 1 else self.app.log_mmr)
+                return True, 0
+        return super().nativeEvent(event_type, message)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        card = QRectF(0.5, 0.5, self.W - 1, self.H - 1)
+        p.setPen(QPen(LINE, 1))
+        p.setBrush(BG)
+        p.drawRoundedRect(card, 12, 12)
+
+        # medal
+        if self.medal:
+            p.drawPixmap(QRectF(8, 5, 64, 64).toRect(), self.medal)
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#1d222b"))
+            p.drawEllipse(QRectF(14, 11, 52, 52))
+
+        x, right = 80, self.W - 12
+        if not self.state:
+            p.setPen(LOSS if self.error else DIM)
+            p.setFont(self._font(9))
+            p.drawText(QRectF(x, 0, right - x, self.H), Qt.AlignVCenter | Qt.TextWordWrap,
+                       "Can't reach OpenDota" if self.error else "Loading rank…")
+            return
+
+        player, matches = self.state["player"], self.state["matches"]
+        log = self.app.mmr_log()
+        tier, lb = player.get("rank_tier"), player.get("leaderboard_rank")
+
+        # top row: medal name (+ leaderboard spot) on the left, session or today on the right
+        p.setFont(self._font(11, QFont.Bold))
+        p.setPen(TEXT)
+        name = rank_name(tier)
+        p.drawText(QRectF(x, 9, right - x, 20), Qt.AlignLeft | Qt.AlignVCenter, name)
+        if lb:
+            nx = x + QFontMetrics(p.font()).horizontalAdvance(name) + 5
+            p.setPen(GOLD)
+            p.setFont(self._font(9, QFont.DemiBold))
+            p.drawText(QRectF(nx, 9, right - nx, 20), Qt.AlignLeft | Qt.AlignVCenter, f"#{lb}")
+        start = self.app.session_start()
+        if start:
+            w, l, mmr, known = session_summary(start, matches, log)
+            parts = [(f"session {w}–{l}", DIM)] + ([(f" {mmr:+d}", WIN if mmr >= 0 else LOSS)] if known else [])
+        else:
+            midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+            today = [m for m in matches if m["start_time"] >= midnight]
+            w = sum(map(won, today))
+            parts = [(f"today {w}–{len(today) - w}", DIM)] if today and not lb else []
+        tx = right
+        for text, color in reversed(parts):  # right-aligned, drawn right to left
+            p.setFont(self._font(8, QFont.DemiBold if color != DIM else QFont.Normal))
+            tx -= QFontMetrics(p.font()).horizontalAdvance(text)
+            p.setPen(color)
+            p.drawText(QRectF(tx, 9, right - tx, 20), Qt.AlignLeft | Qt.AlignVCenter, text)
+
+        # last 5: newest on the left. A game you logged MMR for but OpenDota
+        # hasn't fetched yet goes first, drawn dashed.
+        by_match, pending, _ = mmr_deltas(log, matches)
+        boxes = ([{"pending": pending}] if pending else []) + matches
+        size, gap, y = 24, 5, 34
+        for i in range(5):
+            r = QRectF(x + i * (size + gap), y, size, size)
+            if i < len(boxes) and "pending" in boxes[i]:
+                c = WIN if pending > 0 else LOSS
+                p.setPen(QPen(c, 1.2, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
+                p.setFont(self._font(9, QFont.Bold))
+                p.drawText(r, Qt.AlignCenter, "W" if pending > 0 else "L")
+                self._delta(p, r, pending)
+            elif i < len(boxes):
+                m = boxes[i]
+                c = WIN if won(m) else LOSS
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(c.red(), c.green(), c.blue(), 50))
+                p.drawRoundedRect(r, 5, 5)
+                p.setPen(QPen(c, 1.2))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
+                p.setPen(c)
+                p.setFont(self._font(9, QFont.Bold))
+                p.drawText(r, Qt.AlignCenter, "W" if won(m) else "L")
+                self._delta(p, r, by_match.get(m["match_id"]))
+                if m["match_id"] == self.new_match:
+                    p.setPen(QPen(TEXT, 1.5))
+                    p.drawRoundedRect(r.adjusted(-2.5, -2.5, 2.5, 2.5), 7, 7)
+            else:
+                p.setPen(QPen(LINE, 1, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r, 5, 5)
+
+    def _delta(self, p, r, d):
+        if d is None:
+            return
+        p.setPen(WIN if d >= 0 else LOSS)
+        p.setFont(self._font(8, QFont.DemiBold))
+        p.drawText(QRectF(r.x() - 6, r.bottom() + 1, r.width() + 12, 13), Qt.AlignCenter, f"{d:+d}")
+
+    @staticmethod
+    def _font(pt, weight=QFont.Normal):
+        f = QFont("Segoe UI", pt)
+        f.setWeight(weight)
+        return f
+
+    def set_data(self, data):
+        if "error" in data:
+            self.error = data["error"]
+        else:
+            old = self.state and self.state["matches"][:1]
+            if old and data["matches"] and data["matches"][0]["match_id"] != old[0]["match_id"]:
+                self.new_match = data["matches"][0]["match_id"]
+            self.state, self.error = data, None
+            self.medal = compose_medal(data["icons"])
+            lb = data["player"].get("leaderboard_rank")
+            hint = "" if data["matches"] else "\nNo ranked games found - is Expose Public Match Data on?"
+            self.setToolTip(f"{rank_name(data['player'].get('rank_tier'))}{f' #{lb}' if lb else ''}\n"
+                            "Click: full stats · Drag: move · Ctrl+Shift+R: hide · Ctrl+Shift+M: log MMR" + hint)
+        self.update()
+
+
+def compose_medal(layers):
+    if not layers:
+        return None
+    out = QPixmap(128, 128)
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    for raw in layers:
+        pm = QPixmap()
+        pm.loadFromData(raw)
+        p.drawPixmap(out.rect(), pm)
+    p.end()
+    return out
+
+
+# --- the big window: the dashboard page in an embedded browser -----------
+
+class Page(QWebEnginePage):
+    """Our own page talks back by logging '@app {json}' (e.g. session start/end)."""
+
+    def __init__(self, profile, parent, on_message):
+        super().__init__(profile, parent)
+        self.on_message = on_message
+        # links open in the normal browser instead of a window that never appears
+        self.newWindowRequested.connect(lambda req: QDesktopServices.openUrl(req.requestedUrl()))
+
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        if message.startswith("@app ") and source.startswith("file:"):
+            try:
+                self.on_message(json.loads(message[5:]))
+            except ValueError:
+                pass
+
+
+class StatsWindow(QWebEngineView):
+    def __init__(self, on_message):
+        super().__init__()
+        profile = QWebEngineProfile("DotaRankTracker", self)  # named = localStorage survives restarts
+        profile.setPersistentStoragePath(str(DATA_DIR / "web"))
+        page = Page(profile, self, on_message)
+        page.settings().setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
+        page.settings().setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, False)
+        self.setPage(page)
+        self.setWindowTitle("Dota Rank Tracker")
+        self.resize(1240, 880)
+        self.page().setBackgroundColor(QColor("#0e1116"))
+        self.account = None
+        self.state = None  # (account, mmr log, session start) to mirror into the page
+        self.loadFinished.connect(lambda ok: ok and self.state and self.push(*self.state))
+
+    def push(self, account, log, session):
+        """The widget owns the MMR log and session; mirror them into the page's storage."""
+        self.state = (account, log, session)
+        if account == self.account:
+            self.page().runJavaScript(f"store.set('dota.mmr.{account}', {json.dumps(log)});"
+                                      f"store.set('dota.session.{account}', {json.dumps(session)});"
+                                      "if (data) render();")
+
+    def open(self, account):
+        if account != self.account:
+            self.account = account
+            url = QUrl.fromLocalFile(str(HERE / "index.html"))
+            url.setQuery(f"id={account}&app=1")
+            self.load(url)
+        else:
+            self.page().runJavaScript("load()")
+        self.showNormal()
+        dark_title_bar(int(self.winId()))
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, e):  # closing only hides; the widget keeps running
+        e.ignore()
+        self.hide()
+
+
+# --- app glue --------------------------------------------------------------
+
+class App:
+    def __init__(self, qt):
+        self.qt = qt
+        self.settings = load_settings()
+        self.overlay = Overlay(self)
+        self.stats = None
+        self.fetcher = Fetcher()
+        self.fetcher.done.connect(self.on_data)
+        self.busy = False
+        self.asking = False
+
+        self.menu = QMenu()
+        self.toggle_act = QAction("Hide widget  (Ctrl+Shift+R)", self.menu, triggered=self.toggle_overlay)
+        self.session_act = QAction("Start session", self.menu, triggered=self.toggle_session)
+        self.menu.addAction(self.toggle_act)
+        self.menu.addAction(QAction("Open full stats", self.menu, triggered=self.open_stats))
+        self.menu.addAction(QAction("Log MMR…  (Ctrl+Shift+M)", self.menu, triggered=self.log_mmr))
+        self.menu.addAction(self.session_act)
+        self.menu.addAction(QAction("Check for new games now", self.menu, triggered=lambda: self.poll(True)))
+        self.menu.addAction(QAction("Change account…", self.menu, triggered=self.ask_account))
+        self.menu.addSeparator()
+        self.menu.addAction(QAction("Quit", self.menu, triggered=self.quit))
+        self.menu.aboutToShow.connect(
+            lambda: self.session_act.setText("End session" if self.session_start() else "Start session"))
+        self.tray = QSystemTrayIcon(app_icon(), qt)
+        self.tray.setToolTip("Dota Rank Tracker")
+        self.tray.setContextMenu(self.menu)
+        self.tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and self.toggle_overlay())
+        self.tray.show()
+
+        if not self.settings.get("account") and not self.ask_account():
+            sys.exit(0)
+        self.place()
+        self.overlay.show()
+        hwnd = int(self.overlay.winId())
+        taken = [chr(vk) for hid, vk in HOTKEYS.items()
+                 if os.name == "nt" and not U.RegisterHotKey(hwnd, hid, 0x0002 | 0x0004 | 0x4000, vk)]
+        if taken:
+            self.tray.showMessage("Dota Rank Tracker",
+                                  f"Ctrl+Shift+{'/'.join(taken)} is taken by another app; use the tray menu instead.")
+        if self.settings.get("hidden"):
+            self.overlay.hide()
+            self.toggle_act.setText("Show widget  (Ctrl+Shift+R)")
+
+        self.timer = QTimer(timeout=lambda: self.poll(True))
+        self.timer.start(POLL_MS)
+        # Dota borderless can push itself above us; re-assert topmost now and then
+        self.top_timer = QTimer(timeout=lambda: self.overlay.isVisible() and pin_topmost(int(self.overlay.winId())))
+        self.top_timer.start(5000)
+        self.poll(False)
+
+    def place(self):
+        geo = self.qt.primaryScreen().availableGeometry()
+        x, y = self.settings.get("pos") or (geo.right() - Overlay.W - 24, geo.top() + 24)
+        # keep it on a visible screen if monitors changed
+        if not any(s.availableGeometry().contains(QPoint(x + 20, y + 20)) for s in self.qt.screens()):
+            x, y = geo.right() - Overlay.W - 24, geo.top() + 24
+        self.overlay.move(x, y)
+
+    def ask_account(self):
+        text, ok = QInputDialog.getText(None, "Dota Rank Tracker",
+                                        "Your Dota friend ID, or a Steam / OpenDota / Dotabuff link:\n"
+                                        "(Turn on 'Expose Public Match Data' in Dota settings.)",
+                                        text=self.settings.get("account", ""))
+        account = ok and parse_id(text)
+        if not account:
+            return False
+        self.settings["account"] = account
+        save_settings(self.settings)
+        self.overlay.state = None
+        self.overlay.medal = None
+        self.overlay.update()
+        if self.stats and self.stats.isVisible():
+            self.open_stats()
+        self.poll(False)  # if a fetch for the old account is running, on_data re-polls
+        return True
+
+    def poll(self, ask_refresh):
+        if self.busy or not self.settings.get("account"):
+            return
+        self.busy = True
+        self.fetcher.run(self.settings["account"], ask_refresh)
+
+    def on_data(self, data):
+        self.busy = False
+        if data["account"] != self.settings.get("account"):  # account changed mid-fetch
+            self.poll(False)
+            return
+        self.overlay.set_data(data)
+        if self.overlay.medal:
+            self.tray.setIcon(QIcon(self.overlay.medal))
+
+    # MMR log and session are per account
+    def mmr_log(self):
+        return self.settings.get("mmr", {}).get(self.settings.get("account"), [])
+
+    def session_start(self):
+        return self.settings.get("session", {}).get(self.settings.get("account"))
+
+    def _changed(self):
+        save_settings(self.settings)
+        self.overlay.update()
+        if self.stats:
+            self.stats.push(self.settings["account"], self.mmr_log(), self.session_start())
+
+    def log_mmr(self):
+        if self.asking:
+            return
+        self.asking = True
+        try:
+            log = self.mmr_log()
+            value, ok = QInputDialog.getInt(None, "Log MMR", "Your MMR now (Dota → Profile → Stats):",
+                                            log[-1]["mmr"] if log else 3000, 0, 20000, 1,
+                                            Qt.WindowStaysOnTopHint)
+        finally:
+            self.asking = False
+        if ok:
+            self.settings.setdefault("mmr", {})[self.settings["account"]] = add_log(log, value, int(time.time() * 1000))
+            self._changed()
+
+    def set_session(self, start):
+        self.settings.setdefault("session", {})[self.settings["account"]] = start
+        self._changed()
+
+    def toggle_session(self):
+        self.set_session(None if self.session_start() else int(time.time() * 1000))
+
+    def on_page_message(self, msg):
+        if "session" in msg and (msg["session"] is None or isinstance(msg["session"], (int, float))):
+            self.set_session(msg["session"] and int(msg["session"]))
+
+    def toggle_overlay(self):
+        show = not self.overlay.isVisible()
+        self.overlay.setVisible(show)
+        if show:
+            pin_topmost(int(self.overlay.winId()))
+        self.settings["hidden"] = not show
+        save_settings(self.settings)
+        self.toggle_act.setText(("Hide" if show else "Show") + " widget  (Ctrl+Shift+R)")
+
+    def open_stats(self):
+        if not self.stats:
+            self.stats = StatsWindow(self.on_page_message)
+            self.stats.setWindowIcon(app_icon())
+        account = self.settings["account"]
+        self.stats.open(account)
+        self.stats.push(account, self.mmr_log(), self.session_start())
+
+    def quit(self):
+        self.tray.hide()
+        self.qt.exit(0)  # exit, not quit: the stats window ignores close
+
+
+def app_icon():
+    pm = QPixmap(64, 64)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(4, 4, 56, 56), 14, 14)
+    p.fillPath(path, QColor("#c23b2a"))
+    p.setPen(QColor("white"))
+    p.setFont(QFont("Segoe UI", 26, QFont.Bold))
+    p.drawText(pm.rect(), Qt.AlignCenter, "R")
+    p.end()
+    return QIcon(pm)
+
+
+def main():
+    if not single_instance():
+        return
+    qt = QApplication(sys.argv)
+    qt.setQuitOnLastWindowClosed(False)
+    qt.setApplicationName("Dota Rank Tracker")
+    App(qt)
+    sys.exit(qt.exec())
+
+
+if __name__ == "__main__":
+    main()

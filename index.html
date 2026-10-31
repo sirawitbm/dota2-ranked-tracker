@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dota Rank Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==" crossorigin="anonymous"></script>
+<style>
+  :root {
+    --bg: #0e1116; --card: #171b22; --line: #262c36; --text: #e6e8eb; --dim: #8b93a1;
+    --win: #4cc26b; --loss: #e0533f; --gold: #d9a441; --accent: #c23b2a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid > .card { margin-bottom: 0; }
+  input, button { font: inherit; color: var(--text); background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; height: 38px; }
+  input { flex: 1; min-width: 0; }
+  button { cursor: pointer; background: var(--accent); border-color: var(--accent); font-weight: 600; white-space: nowrap; }
+  button.ghost { background: transparent; border-color: var(--line); font-weight: 500; }
+  button:disabled { opacity: .5; cursor: default; }
+  .seg button { background: transparent; border-color: var(--line); font-weight: 500; }
+  .seg button.on { background: #2a303b; border-color: #3a4250; }
+  .dim { color: var(--dim); } .win { color: var(--win); } .loss { color: var(--loss); } .gold { color: var(--gold); }
+  .small { font-size: 12px; }
+  #status { min-height: 20px; }
+
+  .profile { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .avatar { width: 64px; height: 64px; border-radius: 8px; }
+  .medal { position: relative; width: 84px; height: 84px; flex: none; }
+  .medal img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .medal .lb { position: absolute; bottom: 6px; width: 100%; text-align: center; font-weight: 700; font-size: 13px; text-shadow: 0 1px 3px #000; }
+  .name { font-size: 22px; font-weight: 700; }
+  .rankname { font-size: 18px; font-weight: 600; }
+
+  .tiles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .tile { background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tile .k { font-size: 12px; color: var(--dim); }
+
+  .last2 { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .big { color: inherit; display: flex; gap: 12px; align-items: center; background: #0b0d11; border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 8px; padding: 10px; }
+  .big.w { border-left-color: var(--win); } .big.l { border-left-color: var(--loss); }
+  .big img { width: 96px; border-radius: 6px; }
+  .big .res { font-weight: 700; font-size: 16px; }
+
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td img.hero { width: 32px; height: 32px; vertical-align: middle; border-radius: 4px; margin-right: 6px; }
+  td img.mini { width: 26px; height: 26px; vertical-align: middle; }
+  tr.w td:first-child { box-shadow: inset 3px 0 var(--win); } tr.l td:first-child { box-shadow: inset 3px 0 var(--loss); }
+  a { color: var(--gold); text-decoration: none; }
+  .bar { height: 6px; background: #2a303b; border-radius: 3px; overflow: hidden; min-width: 60px; }
+  .bar i { display: block; height: 100%; background: var(--win); }
+  canvas { max-height: 240px; }
+  .hidden { display: none !important; }
+  .session { border-color: #4a3b1f; background: linear-gradient(90deg, rgba(217,164,65,.10), var(--card) 60%); }
+  .session .big-num { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  tr.insession td { background: rgba(217,164,65,.06); }
+  button.flag { height: 28px; padding: 0 8px; background: transparent; border-color: var(--line); color: var(--dim); font-weight: 500; }
+  button.flag:hover { color: var(--gold); border-color: var(--gold); }
+</style>
+</head>
+<body>
+<main>
+  <div class="card" id="idCard">
+    <div class="row">
+      <input id="idInput" placeholder="Your Dota friend ID, Steam profile link, or OpenDota/Dotabuff link">
+      <button id="saveId">Track</button>
+    </div>
+    <div class="small dim" style="margin-top:6px">Friend ID is in Dota → your profile. Turn on <b>Expose Public Match Data</b> in Dota settings or nothing shows up.</div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <div class="profile">
+        <img id="avatar" class="avatar" alt="">
+        <div style="flex:1;min-width:180px">
+          <div class="name" id="pname"></div>
+          <div class="rankname" id="rankname"></div>
+          <div class="small dim" id="pextra"></div>
+        </div>
+        <div class="medal" id="medal"></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="newest">Get newest games</button>
+        <button class="ghost" id="reload">Reload</button>
+        <label class="small dim row" style="gap:6px"><input type="checkbox" id="auto" style="flex:none;height:auto"> auto-check every 3 min</label>
+        <span id="status" class="small dim"></span>
+      </div>
+    </div>
+
+    <div class="card session">
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div style="flex:1;min-width:220px">
+          <h2 style="margin:0 0 6px">Session</h2>
+          <div id="sessionText"></div>
+          <div class="small dim" id="sessionHint" style="margin-top:4px"></div>
+        </div>
+        <button id="sessionBtn">Start session</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Ranked numbers</h2>
+      <div class="tiles" id="tiles"></div>
+    </div>
+
+    <div class="card">
+      <h2>Last 2 ranked games</h2>
+      <div class="last2" id="last2"></div>
+    </div>
+
+    <div class="grid" style="margin-bottom:14px">
+      <div class="card"><h2>Ranked form (last 100, +1 win / −1 loss)</h2><canvas id="formChart"></canvas></div>
+      <div class="card"><h2>Average medal in your games</h2><canvas id="lobbyChart"></canvas><div class="small dim" id="lobbyNote"></div></div>
+    </div>
+
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px">
+        <h2 style="margin:0">Match history</h2>
+        <div class="seg row" style="gap:4px"><button data-mode="ranked" class="on">Ranked</button><button data-mode="all">All modes</button></div>
+      </div>
+      <div class="tablewrap"><table id="matches"></table></div>
+    </div>
+
+    <div class="grid" style="margin-bottom:14px">
+      <div class="card"><h2>Rank history</h2>
+        <div class="small dim" style="margin-bottom:8px">Medal changes are saved on this PC. Log your MMR after each game (Dota → Profile → Stats) and every game gets its exact +/-.</div>
+        <div class="small gold hidden" id="appMmrNote" style="margin-bottom:10px">Log MMR from the widget: Ctrl+Shift+M, or right-click it → Log MMR.</div>
+        <div class="row" style="margin-bottom:10px" id="mmrRow"><input id="mmrInput" type="number" inputmode="numeric" placeholder="My MMR right now"><button id="mmrSave">Log MMR</button></div>
+        <canvas id="mmrChart" class="hidden"></canvas>
+        <div class="tablewrap"><table id="rankHist"></table></div>
+      </div>
+      <div class="card"><h2>By role / party / side</h2><div class="tablewrap"><table id="splits"></table></div></div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><h2>Heroes (ranked)</h2><div class="tablewrap"><table id="heroes"></table></div></div>
+      <div class="card"><h2>Played with (ranked, last 6 months)</h2><div class="tablewrap"><table id="peers"></table></div></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const API = "https://api.opendota.com/api";
+const CDN = "https://cdn.cloudflare.steamstatic.com";
+const RANKS = ["", "Herald", "Guardian", "Crusader", "Archon", "Legend", "Ancient", "Divine", "Immortal"];
+const ROLES = { 1: "Safe lane", 2: "Mid", 3: "Off lane", 4: "Jungle" };
+const FIELDS = ["hero_id","start_time","duration","game_mode","lobby_type","kills","deaths","assists","average_rank",
+  "leaver_status","party_size","gold_per_min","xp_per_min","last_hits","hero_damage","tower_damage","hero_healing","lane_role","is_roaming"];
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+let heroes = {}, modes = {}, data = null, mode = "ranked", charts = {}, autoTimer = null;
+const accountId = () => store.get("dota.account");
+
+// Accepts friend id, steamid64, or a link to Steam / OpenDota / Dotabuff / Stratz.
+function parseId(s) {
+  s = s.trim();
+  const big = s.match(/7656\d{13}/);
+  if (big) return String(BigInt(big[0]) - 76561197960265728n);
+  const m = s.match(/(\d{3,10})\/?$/) || s.match(/players\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+async function get(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(`OpenDota said ${r.status} for ${path.split("?")[0]}`);
+  return r.json();
+}
+
+const rankName = t => !t ? "Uncalibrated" : t >= 80 ? "Immortal" : `${RANKS[Math.floor(t / 10)]} ${t % 10}`;
+// average_rank in matches is a rank_tier-ish number (e.g. 54.3 = Legend 4)
+const rankFromAvg = a => a == null ? "–" : rankName(Math.round(a));
+const won = m => (m.player_slot < 128) === m.radiant_win;
+const heroImg = (id, big) => heroes[id] ? esc(CDN + (big ? heroes[id].img : heroes[id].icon).replace(/\?$/, "")) : "";
+const heroName = id => heroes[id]?.localized_name ?? `Hero ${id}`;
+const pct = (w, g) => g ? Math.round(100 * w / g) + "%" : "–";
+const dur = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+function ago(t) {
+  const s = Date.now() / 1000 - t;
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  if (s < 86400 * 30) return Math.round(s / 86400) + " d ago";
+  return new Date(t * 1000).toLocaleDateString();
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function medalHtml(tier, lb) {
+  if (!tier) return "";
+  const t = Math.floor(tier / 10), stars = tier % 10;
+  return `<img src="https://www.opendota.com/assets/images/dota2/rank_icons/rank_icon_${t}.png" alt="">` +
+    (stars ? `<img src="https://www.opendota.com/assets/images/dota2/rank_icons/rank_star_${stars}.png" alt="">` : "") +
+    (lb ? `<div class="lb">#${lb}</div>` : "");
+}
+
+async function load() {
+  const id = accountId();
+  if (!id) return;
+  $("app").classList.remove("hidden");
+  setStatus("Loading…");
+  try {
+    if (!Object.keys(heroes).length) [heroes, modes] = await Promise.all([get("/constants/heroes"), get("/constants/game_mode")]);
+    const proj = FIELDS.map(f => "project=" + f).join("&");
+    const [player, wl, ranked, all, heroStats, peers] = await Promise.all([
+      get(`/players/${id}`),
+      get(`/players/${id}/wl?lobby_type=7`),
+      get(`/players/${id}/matches?lobby_type=7&limit=200&${proj}`),
+      get(`/players/${id}/matches?limit=50&${proj}`),
+      get(`/players/${id}/heroes?lobby_type=7`),
+      get(`/players/${id}/peers?lobby_type=7&date=180`),
+    ]);
+    if (!player.profile) throw new Error("No player with that ID, or match data isn't public.");
+    data = { player, wl, ranked, all, heroStats, peers };
+    snapshotRank(player);
+    render();
+    setStatus("Updated " + new Date().toLocaleTimeString());
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+function setStatus(t, bad) { $("status").textContent = t; $("status").className = "small " + (bad ? "loss" : "dim"); }
+
+// Keep a local log of medal changes, since OpenDota only knows the current medal.
+function snapshotRank(p) {
+  const hist = store.get("dota.rankHist." + accountId(), []);
+  const last = hist[hist.length - 1];
+  if (!last || last.tier !== p.rank_tier || last.lb !== p.leaderboard_rank) {
+    hist.push({ t: Date.now(), tier: p.rank_tier, lb: p.leaderboard_rank });
+    store.set("dota.rankHist." + accountId(), hist);
+  }
+}
+
+function render() {
+  const { player: p, wl, ranked, heroStats, peers } = data;
+  $("avatar").src = p.profile.avatarfull;
+  $("pname").textContent = p.profile.personaname;
+  $("rankname").textContent = rankName(p.rank_tier) + (p.leaderboard_rank ? `  ·  #${p.leaderboard_rank}` : "");
+  $("pextra").textContent = [p.computed_mmr && `OpenDota MMR estimate ~${Math.round(p.computed_mmr)}`, p.profile.plus && "Dota Plus",
+    p.profile.loccountrycode].filter(Boolean).join("  ·  ");
+  $("medal").innerHTML = medalHtml(p.rank_tier, p.leaderboard_rank);
+
+  // tiles
+  const last20 = ranked.slice(0, 20), w20 = last20.filter(won).length;
+  const midnight = new Date().setHours(0, 0, 0, 0) / 1000;
+  const today = ranked.filter(m => m.start_time >= midnight), wT = today.filter(won).length;
+  const week = ranked.filter(m => m.start_time >= Date.now() / 1000 - 7 * 86400), wW = week.filter(won).length;
+  let streak = 0;
+  for (const m of ranked) { if (won(m) === won(ranked[0])) streak++; else break; }
+  const avg = (list, f) => list.length ? list.reduce((s, m) => s + (m[f] || 0), 0) / list.length : 0;
+  const ranks = last20.map(m => m.average_rank).filter(x => x != null);
+  const kda = avg(last20, "deaths") ? (avg(last20, "kills") + avg(last20, "assists")) / avg(last20, "deaths") : 0;
+  const tiles = [
+    ["Ranked all time", `${wl.win}–${wl.lose}`, pct(wl.win, wl.win + wl.lose) + " win rate"],
+    ["Last 20 ranked", `${w20}–${last20.length - w20}`, pct(w20, last20.length)],
+    ["Today", `${wT}–${today.length - wT}`, (wT * 2 - today.length >= 0 ? "+" : "") + (wT * 2 - today.length) + " net"],
+    ["Last 7 days", `${wW}–${week.length - wW}`, pct(wW, week.length)],
+    ["Streak", ranked.length ? `${streak} ${won(ranked[0]) ? "W" : "L"}` : "–", ranked[0] ? "current" : ""],
+    ["Avg medal in games", ranks.length ? rankFromAvg(ranks.reduce((a, b) => a + b) / ranks.length) : "–", "last 20 ranked"],
+    ["KDA (last 20)", kda.toFixed(2), `${avg(last20, "kills").toFixed(1)} / ${avg(last20, "deaths").toFixed(1)} / ${avg(last20, "assists").toFixed(1)}`],
+    ["GPM / XPM", `${Math.round(avg(last20, "gold_per_min"))} / ${Math.round(avg(last20, "xp_per_min"))}`, "last 20 avg"],
+    ["Hero damage", Math.round(avg(last20, "hero_damage")).toLocaleString(), "last 20 avg"],
+    ["Game length", dur(Math.round(avg(last20, "duration"))), "last 20 avg"],
+  ];
+  $("tiles").innerHTML = tiles.map(([k, v, s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div></div>`).join("");
+
+  // last 2 games
+  const mmr = mmrByMatch();
+  $("last2").innerHTML = ranked.slice(0, 2).map((m, i) => {
+    const w = won(m);
+    return `<a class="big ${w ? "w" : "l"}" href="https://www.opendota.com/matches/${m.match_id}" target="_blank" rel="noopener">
+      <img src="${heroImg(m.hero_id, true)}" alt="">
+      <div><div class="small dim">${i ? "Game before that" : "Last game"} · ${ago(m.start_time + m.duration)}</div>
+      <div class="res ${w ? "win" : "loss"}">${w ? "Won" : "Lost"} · ${esc(heroName(m.hero_id))}${mmr[m.match_id] != null ? " · " + delta(mmr[m.match_id]) + " MMR" : ""}</div>
+      <div>${m.kills}/${m.deaths}/${m.assists} · ${dur(m.duration)} · ${m.gold_per_min} GPM · ${m.last_hits} LH</div>
+      <div class="small dim">${ROLES[m.lane_role] ?? "–"} · ${m.party_size > 1 ? "party of " + m.party_size : "solo"} · lobby ${rankFromAvg(m.average_rank)}</div></div></a>`;
+  }).join("") || `<div class="dim">No ranked games found.</div>`;
+
+  renderSession();
+  renderMatches();
+  renderCharts();
+  renderRankHist();
+
+  // splits: role, party, side
+  const split = (label, key) => {
+    const g = {};
+    for (const m of ranked) { const k = key(m); (g[k] ??= { n: 0, w: 0 }); g[k].n++; g[k].w += won(m); }
+    return Object.entries(g).sort((a, b) => b[1].n - a[1].n)
+      .map(([k, v]) => `<tr><td>${label}</td><td>${k}</td><td>${v.n}</td><td>${v.w}–${v.n - v.w}</td><td>${bar(v.w, v.n)}</td></tr>`).join("");
+  };
+  $("splits").innerHTML = `<tr><th></th><th></th><th>Games</th><th>W–L</th><th>Win%</th></tr>` +
+    split("Role", m => ROLES[m.lane_role] ?? "Unknown") +
+    split("Party", m => m.party_size > 1 ? "Party" : "Solo") +
+    split("Side", m => m.player_slot < 128 ? "Radiant" : "Dire") +
+    `<tr><td colspan="5" class="small dim">From your last ${ranked.length} ranked games.</td></tr>`;
+
+  $("heroes").innerHTML = `<tr><th>Hero</th><th>Games</th><th>W–L</th><th>Win%</th><th>Last</th></tr>` +
+    heroStats.filter(h => h.games).slice(0, 25).map(h => `<tr><td><img class="hero" src="${heroImg(h.hero_id)}" alt="">${esc(heroName(h.hero_id))}</td>
+      <td>${h.games}</td><td>${h.win}–${h.games - h.win}</td><td>${bar(h.win, h.games)}</td><td class="dim">${ago(h.last_played)}</td></tr>`).join("");
+
+  $("peers").innerHTML = peers.length ? `<tr><th>Player</th><th>With</th><th>Win%</th><th>Against</th></tr>` +
+    peers.slice(0, 15).map(f => `<tr><td><img class="hero" src="${esc(f.avatar)}" alt=""><a href="https://www.opendota.com/players/${Number(f.account_id)}" target="_blank" rel="noopener">${esc(f.personaname)}</a></td>
+      <td>${f.with_games}</td><td>${bar(f.with_win, f.with_games)}</td><td class="dim">${f.against_games ? `${f.against_win}–${f.against_games - f.against_win}` : "–"}</td></tr>`).join("")
+    : `<tr><td class="dim">No party games in the last 6 months.</td></tr>`;
+}
+
+// Pair each MMR you logged with the one ranked game that ended since the log before it.
+// pending = the latest logged change when OpenDota hasn't got that game yet. Same rules as mmr_deltas() in rank_overlay.py.
+function mmrInfo() {
+  const log = store.get("dota.mmr." + accountId(), []), byMatch = {};
+  let pending = null, pendingT = null;
+  for (let i = 1; i < log.length; i++) {
+    const g = data.ranked.filter(m => { const end = (m.start_time + m.duration) * 1000; return end > log[i - 1].t && end < log[i].t; });
+    if (g.length === 1) byMatch[g[0].match_id] = log[i].mmr - log[i - 1].mmr;
+    else if (!g.length && i === log.length - 1 && log[i].mmr !== log[i - 1].mmr) [pending, pendingT] = [log[i].mmr - log[i - 1].mmr, log[i].t];
+  }
+  return { byMatch, pending, pendingT };
+}
+const mmrByMatch = () => mmrInfo().byMatch;
+
+// Session = every ranked game that started at or after `start` (ms). Same rules as session_summary() in rank_overlay.py.
+function sessionSummary(start) {
+  const { byMatch, pending, pendingT } = mmrInfo();
+  const games = data.ranked.filter(m => m.start_time * 1000 >= start);
+  let n = games.length, w = games.filter(won).length, mmr = 0, known = 0;
+  for (const m of games) if (byMatch[m.match_id] != null) { mmr += byMatch[m.match_id]; known++; }
+  if (pending && pendingT >= start) { n++; w += pending > 0; mmr += pending; known++; }
+  return { n, w, l: n - w, mmr, known };
+}
+const sessionKey = () => "dota.session." + accountId();
+function setSession(t) {
+  store.set(sessionKey(), t);
+  if (new URLSearchParams(location.search).get("app")) console.log("@app " + JSON.stringify({ session: t }));
+  if (data) render();
+}
+function renderSession() {
+  const start = store.get(sessionKey(), null);
+  $("sessionBtn").textContent = start ? "End session" : "Start session";
+  $("sessionBtn").className = start ? "ghost" : "";
+  $("sessionBtn").onclick = () => setSession(start ? null : Date.now());
+  if (!start) {
+    $("sessionText").innerHTML = `<span class="dim">Not tracking a session.</span>`;
+    $("sessionHint").textContent = "Forgot to start one? Click ⚑ on a game in Match history to start the session from that game.";
+    return;
+  }
+  const x = sessionSummary(start);
+  const when = new Date(start).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  $("sessionText").innerHTML = `<div class="row" style="gap:22px">
+      <div><div class="big-num">${x.w}–${x.l}</div><div class="small dim">${x.n} game${x.n === 1 ? "" : "s"}</div></div>
+      <div><div class="big-num">${x.known ? delta(x.mmr) : '<span class="dim">–</span>'}</div><div class="small dim">MMR</div></div>
+      <div><div class="big-num">${(x.w - x.l >= 0 ? "+" : "") + (x.w - x.l)}</div><div class="small dim">net wins</div></div></div>`;
+  $("sessionHint").textContent = `Since ${when}.` + (x.n > x.known ? ` ${x.n - x.known} game${x.n - x.known === 1 ? " has" : "s have"} no logged MMR, so the MMR total leaves ${x.n - x.known === 1 ? "it" : "them"} out.` : "");
+}
+const delta = d => d == null ? '<span class="dim">–</span>' : `<span class="${d >= 0 ? "win" : "loss"}">${d >= 0 ? "+" : ""}${d}</span>`;
+
+const bar = (w, n) => `<div class="row" style="gap:6px;flex-wrap:nowrap"><div class="bar"><i style="width:${n ? 100 * w / n : 0}%"></i></div><span>${pct(w, n)}</span></div>`;
+
+function renderMatches() {
+  const list = mode === "ranked" ? data.ranked.slice(0, 50) : data.all, mmr = mmrByMatch(), start = store.get(sessionKey(), null);
+  $("matches").innerHTML = `<tr><th></th><th>Hero</th><th>Result</th><th>When</th><th>Mode</th><th>K/D/A</th><th>Time</th><th>GPM/XPM</th><th>LH</th><th>Hero dmg</th><th>Tower dmg</th><th>Heal</th><th>Role</th><th>Party</th><th>Lobby</th><th>MMR</th><th></th></tr>` +
+    list.map(m => {
+      const w = won(m);
+      const modeName = (modes[m.game_mode]?.name ?? "").replace("game_mode_", "").replace(/_/g, " ");
+      return `<tr class="${w ? "w" : "l"}${start && m.start_time * 1000 >= start ? " insession" : ""}"><td><button class="flag" data-start="${m.start_time * 1000}" title="Start the session from this game">⚑</button></td><td><img class="hero" src="${heroImg(m.hero_id)}" alt="">${esc(heroName(m.hero_id))}</td>
+        <td class="${w ? "win" : "loss"}">${w ? "Won" : "Lost"}${m.leaver_status ? ' <span class="dim">(abandon)</span>' : ""}</td>
+        <td class="dim">${ago(m.start_time + m.duration)}</td><td class="dim">${m.lobby_type === 7 ? "Ranked " : ""}${esc(modeName)}</td>
+        <td>${m.kills}/${m.deaths}/${m.assists}</td><td>${dur(m.duration)}</td><td>${m.gold_per_min}/${m.xp_per_min}</td><td>${m.last_hits}</td>
+        <td>${(m.hero_damage ?? 0).toLocaleString()}</td><td>${(m.tower_damage ?? 0).toLocaleString()}</td><td>${(m.hero_healing ?? 0).toLocaleString()}</td>
+        <td>${ROLES[m.lane_role] ?? "–"}${m.is_roaming ? " (roam)" : ""}</td><td>${m.party_size > 1 ? m.party_size : "solo"}</td><td>${rankFromAvg(m.average_rank)}</td><td>${delta(mmr[m.match_id])}</td>
+        <td><a href="https://www.opendota.com/matches/${m.match_id}" target="_blank" rel="noopener">OpenDota</a> · <a href="https://stratz.com/matches/${m.match_id}" target="_blank" rel="noopener">Stratz</a></td></tr>`;
+    }).join("");
+}
+
+function chart(id, cfg) {
+  charts[id]?.destroy();
+  charts[id] = new Chart($(id), cfg);
+}
+const axes = { x: { ticks: { color: "#8b93a1", maxTicksLimit: 8 }, grid: { color: "#262c36" } }, y: { ticks: { color: "#8b93a1" }, grid: { color: "#262c36" } } };
+
+function renderCharts() {
+  if (!window.Chart) return;
+  const games = data.ranked.slice(0, 100).reverse();
+  let net = 0;
+  const form = games.map(m => (net += won(m) ? 1 : -1));
+  const labels = games.map(m => new Date(m.start_time * 1000).toLocaleDateString());
+  chart("formChart", { type: "line", data: { labels, datasets: [{ data: form, borderColor: "#d9a441", pointRadius: 0, tension: .2 }] },
+    options: { plugins: { legend: { display: false } }, scales: axes } });
+
+  const withRank = games.filter(m => m.average_rank != null);
+  $("lobbyChart").classList.toggle("hidden", !withRank.length);
+  $("lobbyNote").textContent = withRank.length ? "Going up = you're being matched with higher players." : "OpenDota has no lobby medal for these games.";
+  chart("lobbyChart", { type: "line", data: { labels: withRank.map(m => new Date(m.start_time * 1000).toLocaleDateString()),
+      datasets: [{ data: withRank.map(m => m.average_rank), borderColor: "#4cc26b", pointRadius: 2, tension: .3 }] },
+    options: { plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => rankFromAvg(c.raw) } } },
+      // label only medal boundaries (Legend 1, Ancient 1, ...): in-between numbers like 68 aren't real medals
+      scales: { ...axes, y: { ...axes.y, grid: { color: c => c.tick?.value % 10 === 1 ? "#262c36" : "transparent" },
+        ticks: { ...axes.y.ticks, stepSize: 1, autoSkip: false, callback: v => v % 10 === 1 ? rankName(v) : v === 80 ? "Immortal" : null } } } } });
+}
+
+function renderRankHist() {
+  const id = accountId();
+  const hist = store.get("dota.rankHist." + id, []);
+  const mmr = store.get("dota.mmr." + id, []);
+  const rows = [
+    ...hist.map(h => ({ t: h.t, what: rankName(h.tier) + (h.lb ? ` #${h.lb}` : ""), kind: "Medal" })),
+    ...mmr.map((h, i) => ({ t: h.t, what: h.mmr + (i ? ` (${h.mmr - mmr[i - 1].mmr >= 0 ? "+" : ""}${h.mmr - mmr[i - 1].mmr})` : ""), kind: "MMR" })),
+  ].sort((a, b) => b.t - a.t);
+  // ranked W–L since the last MMR you logged
+  const lastMmr = mmr[mmr.length - 1];
+  const since = lastMmr ? data.ranked.filter(m => (m.start_time + m.duration) * 1000 > lastMmr.t) : [];
+  const ws = since.filter(won).length;
+  $("rankHist").innerHTML = (lastMmr ? `<tr><td colspan="3" class="small">Since you logged ${lastMmr.mmr}: <b>${ws}–${since.length - ws}</b> in ranked</td></tr>` : "") +
+    `<tr><th>When</th><th>What</th><th>Value</th></tr>` +
+    rows.map(r => `<tr><td class="dim">${new Date(r.t).toLocaleString()}</td><td>${r.kind}</td><td>${esc(r.what)}</td></tr>`).join("");
+  $("mmrChart").classList.toggle("hidden", mmr.length < 2 || !window.Chart);
+  if (mmr.length >= 2 && window.Chart) chart("mmrChart", { type: "line",
+    data: { labels: mmr.map(h => new Date(h.t).toLocaleDateString()), datasets: [{ data: mmr.map(h => h.mmr), borderColor: "#c23b2a", pointRadius: 3 }] },
+    options: { plugins: { legend: { display: false } }, scales: axes } });
+}
+
+// OpenDota only learns about new games when asked; this asks, then waits for the newest match to show up.
+async function getNewest() {
+  const id = accountId(), before = data?.all[0]?.match_id;
+  $("newest").disabled = true;
+  try {
+    await fetch(`${API}/players/${id}/refresh`, { method: "POST" });
+    for (let i = 1; i <= 8; i++) {
+      setStatus(`Asked OpenDota for new games, checking (${i}/8)…`);
+      await new Promise(r => setTimeout(r, 15000));
+      const [latest] = await get(`/players/${id}/matches?limit=1&project=hero_id`);
+      if (latest && latest.match_id !== before) { await load(); setStatus("New game found · " + new Date().toLocaleTimeString()); return; }
+    }
+    setStatus("No newer game yet. Steam can take a few minutes after a match ends; try again soon.");
+  } catch (e) { setStatus(e.message, true); }
+  finally { $("newest").disabled = false; }
+}
+
+$("saveId").onclick = () => {
+  const id = parseId($("idInput").value);
+  if (!id) return setStatus("Couldn't read an ID from that. Use your Dota friend ID (numbers).", true), $("app").classList.remove("hidden");
+  store.set("dota.account", id);
+  $("idInput").value = id;
+  load();
+};
+$("idInput").onkeydown = e => e.key === "Enter" && $("saveId").click();
+$("reload").onclick = load;
+$("matches").onclick = e => { const b = e.target.closest("button.flag"); if (b) setSession(+b.dataset.start); };
+$("newest").onclick = getNewest;
+$("mmrSave").onclick = () => {
+  const v = parseInt($("mmrInput").value, 10);
+  if (!(v > 0 && v < 20000)) return;
+  const k = "dota.mmr." + accountId(), log = store.get(k, []);
+  // ponytail: no ranked game ends within 10 min of the last log, so a quick re-log is a typo fix and replaces it
+  if (log.length && Date.now() - log[log.length - 1].t < 10 * 60000) log.pop();
+  store.set(k, [...log, { t: Date.now(), mmr: v }]);
+  $("mmrInput").value = "";
+  renderRankHist();
+};
+document.querySelectorAll(".seg button").forEach(b => b.onclick = () => {
+  mode = b.dataset.mode;
+  document.querySelectorAll(".seg button").forEach(x => x.classList.toggle("on", x === b));
+  if (data) renderMatches();
+});
+$("auto").checked = store.get("dota.auto", false);
+$("auto").onchange = () => { store.set("dota.auto", $("auto").checked); setAuto(); };
+function setAuto() {
+  clearInterval(autoTimer);
+  if ($("auto").checked) autoTimer = setInterval(getNewest, 180000);
+}
+// ponytail: plain console checks, run on every load; a test file if this grows.
+console.assert(parseId("https://steamcommunity.com/profiles/76561197960278073") === "12345", "steam64");
+console.assert(parseId("https://www.dotabuff.com/players/1234567") === "1234567", "dotabuff");
+console.assert(rankName(54) === "Legend 4" && rankName(80) === "Immortal", "rankName");
+
+// The overlay app opens this page with ?id=...&app=1 (account is changed from its tray menu).
+const params = new URLSearchParams(location.search);
+if (params.get("id") && parseId(params.get("id"))) store.set("dota.account", parseId(params.get("id")));
+if (params.get("app")) ["idCard", "mmrRow"].forEach(id => $(id).classList.add("hidden")), $("appMmrNote").classList.remove("hidden");
+if (accountId()) { $("idInput").value = accountId(); load(); setAuto(); }
+</script>
+</body>
+</html>
