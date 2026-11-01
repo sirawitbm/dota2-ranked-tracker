@@ -1,68 +1,72 @@
 # Dota 2 Ranked Tracker
 
-A small always-on-top widget for Dota 2 ranked: your medal, your last 5 games as W/L boxes, and the **MMR +/- of each game** right after it ends. Click it to open a big stats window.
+A small always-on-top widget for Dota 2 ranked. It shows your medal and MMR, your last 5 games as W/L boxes with the **MMR +/- of each one**, and your session total. It reads your MMR straight off Dota's screen, so you see the change the moment you open your profile, with no waiting for Dota Plus.
 
 ![widget](docs/widget.png)
 
 ## Download
 
-Get `DotaRankTracker.exe` from the [Releases](../../releases) page and run it. No install needed.
+Get `DotaRankTracker.exe` from the [Releases](../../releases) page and run it. No install and no account needed.
 
 Windows may say "Windows protected your PC" because the exe isn't signed. Click **More info → Run anyway**.
 
-## First run
+Play Dota in **Borderless Window** mode. Overlays can't show on top of exclusive fullscreen.
 
-1. In Dota: **Settings → Options → Social → Expose Public Match Data**: turn it **on**. Without this, nothing shows up.
-2. Start the app and paste your **Dota friend ID** (Dota → your profile). A Steam profile link or a Dotabuff/OpenDota/Stratz link also works.
-3. The widget appears top-right. Drag it wherever you like.
-4. Play Dota in **Borderless Window** mode. Overlays can't show on top of exclusive fullscreen.
+## Setup (once)
 
-## Using it
+1. In Dota, open your profile's **History** page. Your MMR is in the top right, your medal left of your name.
+2. Press **Ctrl+Shift+E**. Drag a box around the MMR number, then a box around your medal. The widget shows both right away.
+3. Press **Ctrl+Shift+D** once to teach it the way to History: click the **Dota logo** (top left), then **your profile**, then **History**, and press **Ctrl+Shift+D** again to save.
+
+## Every game after that
+
+Press **Ctrl+Shift+D** after a ranked game. It clicks its way to your History page and captures your MMR in about 1 second (your medal a moment later). Already on History? It also spots a new MMR by itself, or press **Ctrl+Shift+E**. You never type or confirm anything.
+
+Only press Ctrl+Shift+D in Dota's menus, not during a match: it really clicks those spots.
+
+Every MMR change counts as one game: + is a **W**, − is an **L**. If you skip capturing between two games, they show as one combined box.
+
+**Wrong number?** Click the widget to open the history. Click the number to fix it, or **×** to delete it.
+
+## Controls
 
 | Do this | What happens |
 |---|---|
-| **Click** the widget | Opens the full stats window |
-| **Drag** the widget | Moves it (position is remembered) |
-| **Right-click** the widget or the tray icon | Menu: capture MMR, set MMR screen area, start/end session, check for new games, change account, quit |
+| **Ctrl+Shift+D** | Go to your History page and capture |
+| **Ctrl+Shift+E** | Capture your MMR and medal off Dota's screen |
 | **Ctrl+Shift+R** | Hide / show the widget |
-| **Ctrl+Shift+E** | Capture your MMR off Dota's screen |
+| **Click** the widget | History: every MMR you captured, fix or delete, mark a session |
+| **Drag** the widget | Moves it (position is remembered) |
+| **Right-click** the widget or the tray icon | Menu: capture, start/end session, history, set screen areas, re-record the way to History, quit |
 
-### MMR +/- per game
+## Sessions
 
-Valve doesn't let outside apps see MMR changes. That's why Dota Plus is the only place that shows them, and it often lags. This app reads your MMR straight off Dota's screen instead, with [RapidOCR](https://github.com/RapidAI/RapidOCR). It's an offline text reader built into the app, and it got 400 out of 400 test numbers right in Dota's own font.
+- **Start session** (history window or right-click menu) counts every game from now.
+- Forgot to start one? In the history, click **⚑** on the first game of your session.
+- While a session runs, the widget shows `session 4–1 +76`. Otherwise it shows today's games.
 
-1. **Once:** open **Dota → Profile** (Stats or History). Your MMR is in the top right. Press **Ctrl+Shift+E** and drag a box around the number. That's the whole setup.
-2. **After each ranked game:** open Profile again. The app logs your new MMR by itself within a few seconds, or press **Ctrl+Shift+E** to capture it right away. You never type or confirm anything.
-3. The widget shows your current MMR under the medal, so you can see that it read the right number. The +/- appears under that game. If OpenDota hasn't picked up the game yet, it shows as a dashed box until it arrives.
+![history](docs/history.png)
 
-**Wrong number?** Open the big window → **MMR history**. Click the number to fix it, or press **×** to delete it.
+## Your medal
 
-Changed resolution, or the number moved? Right-click → **Set MMR screen area…**. The app only reads the box when the screen there is standing still (a menu, not the game), and an automatic read only counts if it's within 300 of your last MMR. The widget doesn't show up in screenshots, so it can sit on top of the number. If you play two games without logging, they can't be split. They still count for W–L, but get no +/-.
+The widget shows a picture of your medal, taken from Dota's screen each time your MMR is captured, so it's always exactly what Dota shows (stars and all). It's only taken when the MMR read works, so it's never a random bit of a game. It's saved as `%APPDATA%\DotaRankTracker\medal.png`.
 
-### Sessions
+## How the MMR reading works
 
-- **Start session** (big window, or the right-click menu) begins counting from now.
-- Forgot to start one? In the big window's **Match history**, click **⚑** next to the first game of your session. It starts from that game.
-- While a session is on, the widget shows `session 3–1 +52` and the big window shows W–L, MMR total and net wins.
+- It reads only the boxes you picked, and only while Dota is the window in front. It waits until that box stops changing (a menu page, not the game itself), so it does nothing during a match.
+- An automatic read only counts if it's within 300 of your last MMR. A capture with Ctrl+Shift+E always counts.
+- The widget hides itself from screenshots, so it can sit right on top of the number.
+- Changed your resolution? Right-click → **Set MMR + medal screen areas…**.
+- No game memory, no Steam login, nothing sent anywhere. Your log is in `%APPDATA%\DotaRankTracker\settings.json`.
 
-### What the big window shows
-
-Medal, leaderboard spot, OpenDota's MMR estimate, ranked W–L (all time, last 20, today, last 7 days), streak, average medal of your lobbies, KDA, GPM/XPM, hero damage, game length, your last 2 games, ranked form chart, lobby medal over time, full match history (hero, result, MMR +/-, KDA, GPM/XPM, last hits, damage, party, lobby medal, links to OpenDota/Stratz), MMR history, win rate by role/party/side, heroes and the people you queue with.
-
-`index.html` also works on its own: double-click it to open it in a browser.
-
-## Where data comes from
-
-- Games and rank: [OpenDota](https://www.opendota.com) API (free, public data only). The app asks OpenDota to fetch your newest games every 3 minutes.
-- Your MMR: read on your own PC from Dota's screen (only the box you picked). No game memory, no Steam login.
-- Your settings and MMR log: `%APPDATA%\DotaRankTracker\` on your own PC. Nothing is uploaded anywhere.
+The text reader is [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)'s tiny recognition model (Apache-2.0), in the ONNX version from [RapidOCR](https://github.com/RapidAI/RapidOCR), run with onnxruntime. It got 1,000 out of 1,000 test numbers right in Dota's own font, at about 2 ms each.
 
 ## Build it yourself
 
 ```powershell
 pip install -r requirements.txt pyinstaller
 python test_rank_overlay.py
-.\build.ps1          # -> dist\DotaRankTracker.exe
+.\build.ps1          # -> dist\DotaRankTracker.exe (~54 MB)
 ```
 
-Pushing a tag like `v0.1.0` builds the exe on GitHub and attaches it to a release.
+Pushing a tag like `v0.2.0` builds the exe on GitHub and attaches it to a release.

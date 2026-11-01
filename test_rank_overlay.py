@@ -1,49 +1,50 @@
 """Run: python test_rank_overlay.py (no Qt window opens)."""
-from rank_overlay import add_log, mmr_deltas, parse_id, rank_name, session_summary, number, accept, same
+import numpy as np
 
-assert parse_id("https://steamcommunity.com/profiles/76561197960278073") == "12345"
-assert parse_id("https://www.dotabuff.com/players/1234567") == "1234567"
-assert parse_id(" 1234567 ") == "1234567" and parse_id("hello") is None
-assert rank_name(54) == "Legend 4" and rank_name(80) == "Immortal" and rank_name(None) == "Uncalibrated"
+from rank_overlay import accept, add_log, games, migrate, number, same, summary, text_lines
 
-S = 1000  # ms per second; match times are in seconds, log times in ms
+S = 1000  # ms per second
+log = [{"t": 1000 * S, "mmr": 3000}, {"t": 2000 * S, "mmr": 3025}, {"t": 3000 * S, "mmr": 3001},
+       {"t": 3500 * S, "mmr": 3001}, {"t": 4000 * S, "mmr": 3030}]
 
+# every MMR change is a game; the first entry and a repeat of the same MMR are not
+assert games(log) == [(2000 * S, 3025, 25), (3000 * S, 3001, -24), (4000 * S, 3030, 29)]
+assert games([]) == [] and games(log[:1]) == []
 
-def game(mid, end, win=True):  # ranked game that ended at `end` seconds
-    return {"match_id": mid, "start_time": end - 100, "duration": 100, "player_slot": 0, "radiant_win": win}
+# session/today: games captured at/after the start
+assert summary(log, 0) == (2, 1, 30)
+assert summary(log, 2500 * S) == (1, 1, 5)  # marked the 2nd game as the start
+assert summary(log, 4000 * S) == (1, 0, 29)  # start exactly at a game counts it
+assert summary(log, 5000 * S) == (0, 0, 0)  # started after the last game: nothing yet
 
-
-log = [{"t": 1000 * S, "mmr": 3000}, {"t": 2000 * S, "mmr": 3025}, {"t": 3000 * S, "mmr": 3001}]
-assert mmr_deltas(log, [game(1, 1500)]) == ({1: 25}, [(3000 * S, -24)])  # 2nd game not on OpenDota yet
-assert mmr_deltas(log, [game(2, 2500, False), game(1, 1500)]) == ({1: 25, 2: -24}, [])
-assert mmr_deltas(log, [game(1, 1500), game(3, 1600)]) == ({}, [(3000 * S, -24)])  # two games in one gap: can't split
-assert mmr_deltas([], []) == ({}, [])
-# OpenDota never got the 1st game: its change must not vanish once a newer game arrives
-assert mmr_deltas(log, [game(2, 2500, False)]) == ({2: -24}, [(2000 * S, 25)])
-assert session_summary(0, [game(2, 2500, False)], log) == (1, 1, 1, 2)
-
-# a re-log within 10 minutes replaces the last entry (typo fix), later ones append
-assert add_log(log, 3010, 3000 * S + 60 * S)[-2:] == [log[1], {"t": 3060 * S, "mmr": 3010}]
-assert len(add_log(log, 3010, 3000 * S + 11 * 60 * S)) == 4
+# a re-capture within 10 minutes replaces the last entry (misread fix), later ones append
+assert add_log(log, 3010, 4000 * S + 60 * S)[-2:] == [log[3], {"t": 4060 * S, "mmr": 3010}]
+assert len(add_log(log, 3010, 4000 * S + 11 * 60 * S)) == 6
 assert add_log([], 3000, 5) == [{"t": 5, "mmr": 3000}]
 
-# session from game 1 on: game 1 (+25 W) and the pending loss (-24) count
-assert session_summary(1400 * S, [game(1, 1500)], log) == (1, 1, 1, 2)
-# session started after both games: nothing yet
-assert session_summary(3500 * S, [game(2, 2500, False), game(1, 1500)], log) == (0, 0, 0, 0)
-# marking the 2nd game as start counts only it
-assert session_summary(2400 * S, [game(2, 2500, False), game(1, 1500)], log) == (0, 1, -24, 1)
-# games with no logged MMR still count for W-L, just not for the MMR total
-assert session_summary(0, [game(5, 4000), game(2, 2500, False), game(1, 1500)], log) == (2, 1, 1, 2)
+# v0.1 settings kept the log per OpenDota account (and a short-lived rank number)
+old = {"account": "1", "mmr": {"1": log}, "session": {"1": 7}, "mmr_area": [1, 2, 3, 4], "medal": 75}
+assert migrate(old) == {"mmr": log, "session": 7, "mmr_area": [1, 2, 3, 4]}
+assert migrate({"mmr": log, "session": None}) == {"mmr": log, "session": None}
+
 # OCR text -> MMR: one number only (in-game K/D/A or the clock must not count)
 assert number("4,002") == 4002 and number("MMR 4002") == 4002 and number("12 345") == 12345
 assert number("513110") is None and number("5/3/10") is None and number("12:34") is None and number("") is None
+# Dota writes "5,404"; OCR may give "5.404" and the label too
+assert number("5,404 MMR") == 5404 and number("5.404") == 5404
+
 # auto-read logs only a changed, believable reading, and never starts the log
 L = [{"t": 0, "mmr": 4000}]
 assert accept(L, 4025) and accept(L, 3975) and not accept(L, 4000)
 assert not accept(L, 4400) and not accept([], 4025) and not accept(L, None)
 # the MMR box counts as "still" when its thumbnail barely changes
-assert same(b" ", b"") and not same(b" ", b"@") and not same(b"", None)
-# Dota writes "5,404"; OCR may give "5.404" and the label too
-assert number("5,404 MMR") == 5404 and number("5.404") == 5404
+assert same(b"\x10\x20", b"\x12\x1e") and not same(b"\x10\x20", b"\x10\x40") and not same(b"\x10", None)
+# the OCR finds each line of light text: here a number (rows 10-25) over a label (rows 30-37);
+# a 2-row speck is not text
+a = np.full((50, 80, 3), 20, np.uint8)
+a[10:26, 15:60] = 230
+a[30:38, 20:50] = 200
+a[45:47, 5:8] = 255
+assert text_lines(a) == [(10, 26, 15, 60), (30, 38, 20, 50)]
+assert text_lines(np.full((20, 20, 3), 20, np.uint8)) == []
 print("ok")
