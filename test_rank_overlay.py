@@ -1,7 +1,7 @@
 """Run: python test_rank_overlay.py (no Qt window opens)."""
 import numpy as np
 
-from rank_overlay import accept, add_log, games, migrate, number, same, summary, text_lines
+from rank_overlay import accept, add_log, games, looks_like, migrate, number, same, summary, text_lines
 
 S = 1000  # ms per second
 log = [{"t": 1000 * S, "mmr": 3000}, {"t": 2000 * S, "mmr": 3025}, {"t": 3000 * S, "mmr": 3001},
@@ -47,4 +47,10 @@ a[30:38, 20:50] = 200
 a[45:47, 5:8] = 255
 assert text_lines(a) == [(10, 26, 15, 60), (30, 38, 20, 50)]
 assert text_lines(np.full((20, 20, 3), 20, np.uint8)) == []
+
+# the History shortcut only clicks when the first spot still looks like the Dota logo did
+logo = np.random.default_rng(1).integers(0, 255, (48, 48, 3), dtype=np.uint8)
+glow = np.clip(logo.astype(int) + 8, 0, 255).astype(np.uint8)  # the logo's animated glow
+game = np.random.default_rng(2).integers(0, 255, (48, 48, 3), dtype=np.uint8)  # a match there
+assert looks_like(logo, glow) and not looks_like(logo, game) and not looks_like(logo, logo[:40])
 print("ok")

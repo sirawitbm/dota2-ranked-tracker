@@ -22,7 +22,7 @@ Play Dota in **Borderless Window** mode. Overlays can't show on top of exclusive
 
 Press **Ctrl+Shift+D** after a ranked game. It clicks its way to your History page and captures your MMR in about 1 second (your medal a moment later). Already on History? It also spots a new MMR by itself, or press **Ctrl+Shift+E**. You never type or confirm anything.
 
-Only press Ctrl+Shift+D in Dota's menus, not during a match: it really clicks those spots.
+It really clicks those spots, so it checks first: if the spot of your first click doesn't look like the Dota logo did when you recorded (say you're in a match), it does nothing and the widget says "not in menus".
 
 Every MMR change counts as one game: + is a **W**, − is an **L**. If you skip capturing between two games, they show as one combined box.
 

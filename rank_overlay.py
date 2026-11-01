@@ -25,6 +25,7 @@ HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DotaRankTracker"
 SETTINGS = DATA_DIR / "settings.json"
 MEDAL = DATA_DIR / "medal.png"  # snapshot of your medal from Dota's screen
+START_SPOT = DATA_DIR / "start_spot.png"  # what the first History click hits (the Dota logo) in the menus
 RETYPE_MS = 10 * 60 * 1000  # no ranked game ends this fast, so a re-capture this soon replaces the last one
 HOTKEYS = {1: 0x52, 2: 0x45, 3: 0x44}  # id -> key: Ctrl+Shift+R hide/show, E capture MMR, D go to History
 # s between replayed clicks for Dota's menu to switch pages: measured logo -> profile -> History,
@@ -137,6 +138,12 @@ def same(a, b):
     return b is not None and max(abs(x - y) for x, y in zip(a, b)) <= 6
 
 
+def looks_like(a, b):
+    """Same picture, give or take an animated glow: the Dota logo spot across menu pages and
+    hover differs by ~3-8 (mean per pixel), the same spot in a game by ~110."""
+    return a.shape == b.shape and float(abs(a.astype("int16") - b.astype("int16")).mean()) < 30
+
+
 # --- Windows bits (signatures declared; undeclared ctypes calls fail silently on 64-bit) ---
 
 if os.name == "nt":
@@ -186,6 +193,11 @@ def dota_in_front():
     buf = ctypes.create_unicode_buffer(64)
     U.GetWindowTextW(U.GetForegroundWindow(), buf, 64)
     return buf.value == "Dota 2"
+
+
+def spot(click):
+    """The 48x48 box around a click."""
+    return [click[0] - 24, click[1] - 24, 48, 48]
 
 
 def replay(clicks, gap=CLICK_GAP):
@@ -774,12 +786,21 @@ class App:
             return self.start_recording()
         if not self.settings.get("mmr_area"):
             return self.pick_area()
-        if dota_in_front():  # only ever click into Dota
-            self.go_history(clicks, CLICK_GAP)
+        if not START_SPOT.exists():  # recorded before this check existed
+            return self.start_recording()
+        self.go_history(clicks, CLICK_GAP)
+
+    def in_menus(self, clicks):
+        """Dota in front and its logo where the first click goes, like when you recorded:
+        so never click into a game."""
+        return dota_in_front() and looks_like(pixels(grab(self.qt, spot(clicks[0]))),
+                                              pixels(QImage(str(START_SPOT))))
 
     def go_history(self, clicks, gap, retry=True):
         """Replay the clicks, then capture as soon as the MMR shows. Not there in time
         (slower PC, slow page): once more with double the gap."""
+        if not self.in_menus(clicks):
+            return self.overlay.flash("not in menus", LOSS)
         self.overlay.flash("going to History…", DIM)
         clicking = threading.Thread(target=replay, args=(clicks, gap), daemon=True)
         clicking.start()
@@ -797,7 +818,7 @@ class App:
                                   self.set_medal(self.medal_img()))  # page has settled
             elif time.time() - start > len(clicks) * gap + 2:
                 self.go_timer.stop()
-                if retry and dota_in_front():
+                if retry:
                     self.go_history(clicks, gap * 2, False)
                 else:
                     self.capture_mmr()  # says it can't read
@@ -828,6 +849,7 @@ class App:
         if clicks:
             self.settings["history_clicks"] = clicks
             save_settings(self.settings)
+            grab(self.qt, spot(clicks[0])).save(str(START_SPOT))  # the logo, to check before each replay
             self.overlay.flash(f"saved {len(clicks)} clicks", WIN)
             QTimer.singleShot(800, self.capture_mmr)
         else:
