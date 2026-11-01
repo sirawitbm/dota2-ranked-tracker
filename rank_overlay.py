@@ -133,6 +133,12 @@ def accept(log, value):
     return value != log[-1]["mmr"] and abs(value - log[-1]["mmr"]) <= MAX_JUMP
 
 
+def believable(log, value, manual):
+    """A read that really is your MMR: you pressed capture, or it's your last MMR or a believable
+    change from it (an automatic read can land on any page that shows a number)."""
+    return value is not None and (manual or accept(log, value) or bool(log) and value == log[-1]["mmr"])
+
+
 def same(a, b):
     """Two tiny greyscale thumbnails look alike (screen didn't change)."""
     return b is not None and max(abs(x - y) for x, y in zip(a, b)) <= 6
@@ -736,15 +742,16 @@ class App:
     def on_read(self, value, medal_img, mode):
         if mode == "auto":
             self.reading = False
-        if value is not None and medal_img is not None:
-            self.set_medal(medal_img)
         manual = mode == "manual"
         log = self.mmr_log()
+        good = believable(log, value, manual)
+        if good and medal_img is not None:  # any page can show a number there, e.g. Heroes (with Axe
+            self.set_medal(medal_img)       # where your medal goes), so only keep it with a real MMR
         if manual and value is None:
             self.overlay.flash("can't read", LOSS)
             self.tray.showMessage("Dota Rank Tracker", "Couldn't read a number in your MMR box. Open Dota's History "
                                   "page, or right-click the widget → Set MMR + medal screen areas.")
-        elif manual or accept(log, value):
+        elif good:
             if not log or value != log[-1]["mmr"]:
                 self.save_mmr(value)
             if manual:

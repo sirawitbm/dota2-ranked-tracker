@@ -1,7 +1,8 @@
 """Run: python test_rank_overlay.py (no Qt window opens)."""
 import numpy as np
 
-from rank_overlay import accept, add_log, games, looks_like, migrate, number, same, summary, text_lines
+from rank_overlay import (accept, add_log, believable, games, looks_like, migrate, number, same, summary,
+                          text_lines)
 
 S = 1000  # ms per second
 log = [{"t": 1000 * S, "mmr": 3000}, {"t": 2000 * S, "mmr": 3025}, {"t": 3000 * S, "mmr": 3001},
@@ -37,6 +38,11 @@ assert number("5,404 MMR") == 5404 and number("5.404") == 5404
 L = [{"t": 0, "mmr": 4000}]
 assert accept(L, 4025) and accept(L, 3975) and not accept(L, 4000)
 assert not accept(L, 4400) and not accept([], 4025) and not accept(L, None)
+# the medal snapshot is only kept with a believable MMR read: an automatic read of some other
+# number (the Heroes page, with Axe where the medal goes) must not replace it
+L = [{"t": 0, "mmr": 5404}]
+assert not believable(L, 17, False) and not believable(L, None, False) and not believable([], 5404, False)
+assert believable(L, 5404, False) and believable(L, 5380, False) and believable(L, 17, True)
 # the MMR box counts as "still" when its thumbnail barely changes
 assert same(b"\x10\x20", b"\x12\x1e") and not same(b"\x10\x20", b"\x10\x40") and not same(b"\x10", None)
 # the OCR finds each line of light text: here a number (rows 10-25) over a label (rows 30-37);
