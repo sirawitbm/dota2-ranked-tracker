@@ -63,7 +63,7 @@ The widget shows a picture of your medal, taken from Dota's screen each time you
 - An automatic read only counts if it's within 300 of your last MMR. A capture with Ctrl+Shift+E always counts.
 - The widget hides itself from screenshots, so it can sit right on top of the number.
 - Changed your resolution? Right-click → **Set MMR + medal screen areas…**.
-- No game memory, no Steam login, nothing sent anywhere. Your log is in `%APPDATA%\DotaRankTracker\settings.json`, with a copy each day in the `backups` folder next to it (the last 7 days).
+- No game memory, no Steam login, nothing sent anywhere. Your log is in `%APPDATA%\DotaRankTracker\settings.json`, with a copy each day in the `backups` folder next to it (the last 7 days). `events.log` there notes each game start/end and when the widget hides or shows.
 - Game start and end come from Dota's own Game State Integration, sent only to your PC (127.0.0.1).
 
 The text reader is [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)'s tiny recognition model (Apache-2.0), in the ONNX version from [RapidOCR](https://github.com/RapidAI/RapidOCR), run with onnxruntime. It got 1,000 out of 1,000 test numbers right in Dota's own font, at about 2 ms each.

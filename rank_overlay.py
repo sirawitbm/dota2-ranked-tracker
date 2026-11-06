@@ -141,6 +141,18 @@ def save_settings(s):
     os.replace(tmp, SETTINGS)  # atomic: a crash mid-save never leaves a half-written file
 
 
+def note(text):
+    """One line in events.log (games starting/ending, the widget hiding/showing), to see what happened."""
+    try:
+        path = DATA_DIR / "events.log"
+        if path.exists() and path.stat().st_size > 100_000:
+            path.replace(path.with_suffix(".old.log"))
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+    except OSError:
+        pass
+
+
 def hotkey_letters(settings):
     """{setting: letter} with the defaults filled in."""
     return {name: settings.get("keys", {}).get(name, default) for name, _, default in HOTKEYS.values()}
@@ -1177,6 +1189,7 @@ class App:
         if not event:
             return
         kind, hero = event
+        note(f"game {kind} ({hero}), widget {'shown' if self.overlay.isVisible() else 'hidden'}")
         if kind == "started":  # picks are done: get out of the way for the match
             if self.overlay.isVisible():
                 self.overlay.hide()
@@ -1186,11 +1199,15 @@ class App:
             QTimer.singleShot(AFTER_GAME_S * 1000, self.after_game)
 
     def after_game(self):
-        """A few seconds after the Ancient falls: widget back, then to History once the menu shows."""
-        if self.auto_hidden:
+        """A few seconds after the Ancient falls: widget back (unless you hid it yourself),
+        then to History once the menu shows."""
+        if self.auto_hidden or not self.settings.get("hidden"):
             self.overlay.show()
+            self.overlay.raise_()
+            self.overlay.update()
             pin_topmost(int(self.overlay.winId()))
             self.auto_hidden = False
+        note(f"after game: widget {'shown' if self.overlay.isVisible() else 'hidden'}")
         if self.settings.get("auto_after_game", True):
             self.after_until = time.time() + 20 * 60  # the post-game screen can stay up a while
             self.after_timer.start(2000)
@@ -1203,6 +1220,7 @@ class App:
             return self.after_timer.stop()
         if self.recording is None and not self.asking and self.in_menus(clicks):
             self.after_timer.stop()
+            note("going to History")
             self.go_history(clicks, CLICK_GAP)
 
     def set_auto(self, on):
@@ -1436,6 +1454,7 @@ class App:
 
     def toggle_overlay(self):
         show = not self.overlay.isVisible()
+        note(f"widget {'shown' if show else 'hidden'} by you")
         self.auto_hidden = False  # your choice wins over the in-game hide
         self.overlay.setVisible(show)
         if show:
