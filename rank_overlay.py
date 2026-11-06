@@ -45,6 +45,7 @@ QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; paddi
 #history QLabel { color: #e6e8eb; font: 10pt "Segoe UI"; }
 #history QLabel#dim { color: #8b93a1; font: 9pt "Segoe UI"; }
 #history QLabel#big { font: 700 26pt "Segoe UI"; }
+#history QLabel#tile { background: #151a21; border: 1px solid #2c333e; border-radius: 8px; padding: 6px 2px; }
 #history QPushButton { background: #c23b2a; color: #ffffff; border: 0; border-radius: 8px; padding: 8px 16px;
                        font: 600 10pt "Segoe UI"; }
 #history QPushButton:hover { background: #d4493a; }
@@ -108,6 +109,18 @@ def games(log):
     didn't capture in between end up as one combined change."""
     return [(cur["t"], cur["mmr"], cur["mmr"] - prev["mmr"])
             for prev, cur in zip(log, log[1:]) if cur["mmr"] != prev["mmr"]]
+
+
+PERIODS = (("Today", 0), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("All time", None))
+
+
+def period_start(days, now_ms):
+    """Start (ms) of a period: 0 days = since midnight today, None = everything."""
+    if days is None:
+        return 0
+    if days == 0:
+        return int(time.mktime(time.localtime(now_ms / 1000)[:3] + (0, 0, 0, 0, 0, -1)) * 1000)
+    return now_ms - days * 86_400_000
 
 
 def summary(log, since):
@@ -451,8 +464,7 @@ class Overlay(QWidget):
         # right, top: session (or today) W-L and MMR total
         x, right = 84, self.W - 12
         start = self.app.session_start()
-        midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1)) * 1000
-        w, l, total = summary(log, start or midnight)
+        w, l, total = summary(log, start or period_start(0, int(time.time() * 1000)))
         parts = [(f"{'session' if start else 'today'} {w}–{l}", DIM)]
         if w + l:
             parts.append((f" {total:+d}", WIN if total >= 0 else LOSS))
@@ -535,6 +547,13 @@ class History(QWidget):
         self.table.itemChanged.connect(self.edited)
         self.table.cellClicked.connect(self.clicked)
 
+        self.tiles = QHBoxLayout()  # +/- and W-L over a few periods, side by side
+        self.tiles.setSpacing(6)
+        for _ in PERIODS:
+            tile = QLabel(alignment=Qt.AlignCenter)
+            tile.setObjectName("tile")
+            self.tiles.addWidget(tile)
+
         self.medal = QLabel()
         top = QHBoxLayout()
         top.addWidget(self.medal)
@@ -544,6 +563,7 @@ class History(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 16, 18, 18)
         lay.addLayout(top)
+        lay.addLayout(self.tiles)
         lay.addWidget(self.session)
         lay.addWidget(self.hint)
         lay.addWidget(self.table)
@@ -563,6 +583,14 @@ class History(QWidget):
             self.session.setText("<span style='color:#8b93a1'>No session running. Press ⚑ on a game to start "
                                  "one there, or Start session to start from now.</span>")
         self.button.setText("End session" if start else "Start session")
+        now = int(time.time() * 1000)
+        for i, (name, days) in enumerate(PERIODS):
+            w, l, total = summary(log, period_start(days, now))
+            color = (WIN if total > 0 else LOSS if total < 0 else DIM).name()
+            self.tiles.itemAt(i).widget().setText(
+                f"<span style='color:#8b93a1; font-size:8pt'>{name}</span><br>"
+                f"<span style='color:{color}; font-size:13pt; font-weight:700'>{total:+d}</span><br>"
+                f"<span style='color:#8b93a1; font-size:8pt'>{w}–{l}</span>")
 
         t = self.table
         t.blockSignals(True)

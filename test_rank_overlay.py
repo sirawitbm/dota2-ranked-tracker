@@ -18,6 +18,14 @@ assert summary(log, 2500 * S) == (1, 1, 5)  # marked the 2nd game as the start
 assert summary(log, 4000 * S) == (1, 0, 29)  # start exactly at a game counts it
 assert summary(log, 5000 * S) == (0, 0, 0)  # started after the last game: nothing yet
 
+# the history's period boxes: Today starts at local midnight, N days is a rolling window, All is everything
+import time  # noqa: E402
+from rank_overlay import period_start  # noqa: E402
+now = int(time.mktime((2026, 11, 6, 15, 30, 0, 0, 0, -1)) * 1000)
+assert period_start(0, now) == int(time.mktime((2026, 11, 6, 0, 0, 0, 0, 0, -1)) * 1000)
+assert period_start(7, now) == now - 7 * 86_400_000 and period_start(None, now) == 0
+assert summary(log, period_start(None, now)) == summary(log, 0)
+
 # a re-capture within 10 minutes replaces the last entry (misread fix), later ones append
 assert add_log(log, 3010, 4000 * S + 60 * S)[-2:] == [log[3], {"t": 4060 * S, "mmr": 3010}]
 assert len(add_log(log, 3010, 4000 * S + 11 * 60 * S)) == 6
