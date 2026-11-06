@@ -18,13 +18,29 @@ assert summary(log, 2500 * S) == (1, 1, 5)  # marked the 2nd game as the start
 assert summary(log, 4000 * S) == (1, 0, 29)  # start exactly at a game counts it
 assert summary(log, 5000 * S) == (0, 0, 0)  # started after the last game: nothing yet
 
-# the history's period boxes: Today starts at local midnight, N days is a rolling window, All is everything
+# the history's period boxes: days run 6 am to 6 am; "7 days" = today and the 6 days before
 import time  # noqa: E402
 from rank_overlay import period_start  # noqa: E402
-now = int(time.mktime((2026, 11, 6, 15, 30, 0, 0, 0, -1)) * 1000)
-assert period_start(0, now) == int(time.mktime((2026, 11, 6, 0, 0, 0, 0, 0, -1)) * 1000)
-assert period_start(7, now) == now - 7 * 86_400_000 and period_start(None, now) == 0
+at = lambda d, h, m=0: int(time.mktime((2026, 11, d, h, m, 0, 0, 0, -1)) * 1000)  # noqa: E731
+now = at(6, 15, 30)
+assert period_start(0, now) == at(6, 6)  # today since 6 am
+assert period_start(0, at(6, 3)) == at(5, 6)  # 3 am is still last night's day
+assert period_start(7, now) == at(0, 6) == int(time.mktime((2026, 10, 31, 6, 0, 0, 0, 0, -1)) * 1000)
+assert period_start(1, now) == period_start(0, now) and period_start(None, now) == 0
 assert summary(log, period_start(None, now)) == summary(log, 0)
+# a period the log doesn't reach back to shows "—" (not a number that's really a shorter period),
+# and so does one with no games in it
+from rank_overlay import period_box  # noqa: E402
+D = 86_400_000
+six = [{"t": now - 6 * D + 3_600_000, "mmr": 5400}, {"t": now - 2 * D, "mmr": 5430}, {"t": now - 3_600_000, "mmr": 5405}]
+assert period_box(six, 30, now) == ("empty", "—", "6 days so far")
+assert period_box(six, 7, now) == ("empty", "—", "6 days so far")
+assert period_box(six, 3, now) == ("up", "+5", "1–1")
+assert period_box(six, None, now) == ("up", "+5", "1–1")
+assert period_box(six, 0, now) == ("down", "-25", "0–1")
+assert period_box(six[:2], 0, now) == ("empty", "—", "no games")
+assert period_box([], 7, now) == ("empty", "—", "no data") and period_box([], None, now) == ("empty", "—", "no games")
+assert period_box([{"t": now - 3_600_000, "mmr": 1}], 7, now)[2] == "1 day so far"
 
 # a re-capture within 10 minutes replaces the last entry (misread fix), later ones append
 assert add_log(log, 3010, 4000 * S + 60 * S)[-2:] == [log[3], {"t": 4060 * S, "mmr": 3010}]

@@ -45,7 +45,7 @@ QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; paddi
 #history QLabel { color: #e6e8eb; font: 10pt "Segoe UI"; }
 #history QLabel#dim { color: #8b93a1; font: 9pt "Segoe UI"; }
 #history QLabel#big { font: 700 26pt "Segoe UI"; }
-#history QLabel#tile { background: #151a21; border: 1px solid #2c333e; border-radius: 8px; padding: 6px 2px; }
+#history QLabel#tile { border-radius: 8px; padding: 6px 2px; }
 #history QPushButton { background: #c23b2a; color: #ffffff; border: 0; border-radius: 8px; padding: 8px 16px;
                        font: 600 10pt "Segoe UI"; }
 #history QPushButton:hover { background: #d4493a; }
@@ -55,6 +55,14 @@ QTableWidget QLineEdit { background: #0b0d11; color: #e6e8eb; border: 1px solid 
 QHeaderView::section { background: #0e1116; color: #8b93a1; border: 0; border-bottom: 1px solid #2c333e;
                        padding: 6px 4px; font: 9pt "Segoe UI"; }
 """
+
+# history period boxes, in the widget's W/L box colours
+TILE_LOOK = {
+    "up": "background: rgba(76, 194, 107, 30); border: 1px solid rgba(76, 194, 107, 150);",
+    "down": "background: rgba(224, 83, 63, 30); border: 1px solid rgba(224, 83, 63, 150);",
+    "flat": "background: #151a21; border: 1px solid #2c333e;",
+    "empty": "background: rgba(255, 255, 255, 6); border: 1px dashed #4a5260;",
+}
 
 WIN, LOSS, BG, LINE, TEXT, DIM, GOLD = (QColor("#4cc26b"), QColor("#e0533f"), QColor(14, 17, 22, 225),
                                         QColor("#2c333e"), QColor("#e6e8eb"), QColor("#8b93a1"), QColor("#d9a441"))
@@ -112,15 +120,30 @@ def games(log):
 
 
 PERIODS = (("Today", 0), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("All time", None))
+DAY_STARTS = 6  # the day rolls over at 6 am, so a late-night session still counts as that evening
 
 
 def period_start(days, now_ms):
-    """Start (ms) of a period: 0 days = since midnight today, None = everything."""
+    """Start (ms) of a period: today (0) or the last N days, each day running 6 am to 6 am;
+    None = everything."""
     if days is None:
         return 0
-    if days == 0:
-        return int(time.mktime(time.localtime(now_ms / 1000)[:3] + (0, 0, 0, 0, 0, -1)) * 1000)
-    return now_ms - days * 86_400_000
+    t = time.localtime(now_ms / 1000)
+    day = t.tm_mday - (t.tm_hour < DAY_STARTS) - max(0, days - 1)  # mktime handles day 0 / negatives
+    return int(time.mktime((t.tm_year, t.tm_mon, day, DAY_STARTS, 0, 0, 0, 0, -1)) * 1000)
+
+
+def period_box(log, days, now_ms):
+    """What a period box shows: (look, big text, small text). A period your log doesn't reach
+    back to yet is "—" rather than a number that's really a shorter period."""
+    start = period_start(days, now_ms)
+    if days and (not log or log[0]["t"] > start):
+        so_far = -(-(now_ms - log[0]["t"]) // 86_400_000) if log else 0  # whole days, rounded up
+        return "empty", "—", f"{so_far} day{'s' * (so_far != 1)} so far" if log else "no data"
+    w, l, total = summary(log, start)
+    if not w + l:
+        return "empty", "—", "no games"
+    return ("up" if total > 0 else "down" if total < 0 else "flat"), f"{total:+d}", f"{w}–{l}"
 
 
 def summary(log, since):
@@ -585,12 +608,13 @@ class History(QWidget):
         self.button.setText("End session" if start else "Start session")
         now = int(time.time() * 1000)
         for i, (name, days) in enumerate(PERIODS):
-            w, l, total = summary(log, period_start(days, now))
-            color = (WIN if total > 0 else LOSS if total < 0 else DIM).name()
-            self.tiles.itemAt(i).widget().setText(
-                f"<span style='color:#8b93a1; font-size:8pt'>{name}</span><br>"
-                f"<span style='color:{color}; font-size:13pt; font-weight:700'>{total:+d}</span><br>"
-                f"<span style='color:#8b93a1; font-size:8pt'>{w}–{l}</span>")
+            look, big, small = period_box(log, days, now)
+            tile = self.tiles.itemAt(i).widget()
+            tile.setStyleSheet(TILE_LOOK[look])  # like the widget's W/L boxes: tinted up/down, dashed when empty
+            color = {"up": WIN, "down": LOSS, "flat": TEXT, "empty": DIM}[look].name()
+            tile.setText(f"<div style='color:#8b93a1; font-size:8pt'>{name}</div>"
+                         f"<div style='color:{color}; font-size:15pt; font-weight:700'>{big}</div>"
+                         f"<div style='color:#8b93a1; font-size:8pt'>{small}</div>")
 
         t = self.table
         t.blockSignals(True)

@@ -43,8 +43,8 @@ Every MMR change counts as one game: + is a **W**, − is an **L**. If you skip 
 
 - **Start session** (history window or right-click menu) counts every game from now.
 - Forgot to start one? In the history, click **⚑** on the first game of your session.
-- While a session runs, the widget shows `session 4–1 +76`. Otherwise it shows today's games.
-- The history window's top row shows your MMR +/- and W–L for **Today, 7 days, 30 days, 90 days and All time**, side by side.
+- While a session runs, the widget shows `session 4–1 +76`. Otherwise it shows today's games (since 6 am).
+- The history window's top row shows your MMR +/- and W–L for **Today, 7 days, 30 days, 90 days and All time**, side by side. A day runs from 6 am to 6 am, so a late-night session counts as that evening. A period your log doesn't reach back to yet shows "—" (say "6 days so far" in the 30-day box).
 
 ![history](docs/history.png)
 
