@@ -21,7 +21,7 @@ Play Dota in **Borderless Window** mode. Overlays can't show on top of exclusive
 
 ## Every game after that
 
-Nothing to press. Once the hero picks are done, the widget hides for the match. When the Ancient falls it waits 10 seconds, shows the widget again, and (once you're back in Dota's menu) goes to your History page and captures your MMR. The game's hero is noted next to that +/- in the history.
+Nothing to press. Once the hero picks are done, the widget hides for the match. When the Ancient falls it waits 10 seconds, shows the widget again, and (once you're back in Dota's menu) goes to your History page and captures your MMR. The game's hero shows as a portrait next to that +/- in the history (each portrait is downloaded once from Valve's image server, then kept; offline you see the name).
 
 You can also press **Ctrl+Shift+D** any time. It clicks its way to your History page and captures your MMR in about 1 second (your medal a moment later). Already on History? It also spots a new MMR by itself, or press **Ctrl+Shift+E**. You never type or confirm anything.
 
@@ -73,7 +73,7 @@ The text reader is [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)'s tiny
 ```powershell
 pip install -r requirements.txt pyinstaller
 python test_rank_overlay.py
-.\build.ps1          # -> dist\DotaRankTracker.exe (~54 MB)
+.\build.ps1          # -> dist\DotaRankTracker.exe (~59 MB)
 ```
 
 Pushing a tag like `v0.3.0` builds the exe on GitHub and attaches it to a release.

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QImage,
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
@@ -29,6 +29,8 @@ HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DotaRankTracker"
 SETTINGS = DATA_DIR / "settings.json"
 BACKUP_DIR = DATA_DIR / "backups"
+PORTRAIT_DIR = DATA_DIR / "heroes"  # hero portraits, downloaded once each from Valve's image server
+PORTRAIT_URL = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/{}.png"
 MEDAL = DATA_DIR / "medal.png"  # snapshot of your medal from Dota's screen
 START_SPOT = DATA_DIR / "start_spot.png"  # what the first History click hits (the Dota logo) in the menus
 RETYPE_MS = 10 * 60 * 1000  # no ranked game ends this fast, so a re-capture this soon replaces the last one
@@ -404,6 +406,45 @@ def hero_name(internal):
     """npc_dota_hero_furion -> Nature's Prophet."""
     key = (internal or "").replace("npc_dota_hero_", "")
     return HERO_NAMES.get(key) or key.replace("_", " ").title()
+
+
+class Portraits(QObject):
+    """Hero portraits (the wide ones Dota's match history uses). Each is downloaded once into
+    PORTRAIT_DIR; until it's there (or offline) you get None and the name is shown instead."""
+    ready = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.cache, self.asked = {}, set()
+
+    def get(self, internal):
+        key = (internal or "").replace("npc_dota_hero_", "")
+        if not re.fullmatch(r"[a-z_]+", key):
+            return None
+        if key not in self.cache:
+            path = PORTRAIT_DIR / f"{key}.png"
+            if path.exists():
+                self.cache[key] = QPixmap(str(path))
+            elif key not in self.asked:
+                self.asked.add(key)
+                threading.Thread(target=self.fetch, args=(key, path), daemon=True).start()
+                return None
+            else:
+                return None
+        return self.cache[key]
+
+    def fetch(self, key, path):
+        import urllib.request
+        try:
+            req = urllib.request.Request(PORTRAIT_URL.format(key), headers={"User-Agent": "DotaRankTracker"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                png = r.read(2_000_000)
+            if png[:8] == b"\x89PNG\r\n\x1a\n":  # only ever keep a real PNG
+                PORTRAIT_DIR.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(png)
+                self.ready.emit()
+        except OSError:  # offline etc.: the name stays, try again next start
+            pass
 
 
 def parse_vdf(text):
@@ -857,15 +898,16 @@ class History(QWidget):
         self.table.setStyle(QStyleFactory.create("Fusion"))  # whole-row tint, not Windows 11's per-cell boxes
         self.table.setHorizontalHeaderLabels(["When", "Hero", "MMR", "+/-", "", ""])
         self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.setIconSize(QSize(56, 32))
         for c in (0, 1):
             self.table.horizontalHeaderItem(c).setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.setShowGrid(False)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setEditTriggers(QAbstractItemView.CurrentChanged | QAbstractItemView.DoubleClicked)
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(1, QHeaderView.Stretch)
-        for c, wdt in ((0, 130), (2, 70), (3, 60), (4, 36), (5, 36)):
+        h.setSectionResizeMode(0, QHeaderView.Stretch)
+        for c, wdt in ((1, 72), (2, 70), (3, 60), (4, 36), (5, 36)):
             h.setSectionResizeMode(c, QHeaderView.Fixed)
             self.table.setColumnWidth(c, wdt)
         self.table.itemChanged.connect(self.edited)
@@ -950,7 +992,9 @@ class History(QWidget):
             e = log[i]
             d = e["mmr"] - log[i - 1]["mmr"] if i else None
             in_session = start is not None and e["t"] >= start and d
-            cells = [(when(e["t"]), DIM), (hero_name(e["hero"]) if e.get("hero") else "", TEXT), (str(e["mmr"]), TEXT),
+            portrait = self.app.portraits.get(e.get("hero"))
+            cells = [(when(e["t"]), DIM), ("" if portrait or not e.get("hero") else hero_name(e["hero"]), TEXT),
+                     (str(e["mmr"]), TEXT),
                      (f"{d:+d}" if d else "–", WIN if d and d > 0 else LOSS if d else DIM),
                      ("⚑", GOLD if e["t"] == start else DIM), ("×", DIM)]
             for c, (text, color) in enumerate(cells):
@@ -962,6 +1006,11 @@ class History(QWidget):
                     item.setFlags(Qt.ItemIsEnabled)
                 if in_session:
                     item.setBackground(QColor(217, 164, 65, 22))
+                if c == 1 and e.get("hero"):
+                    item.setToolTip(hero_name(e["hero"]))
+                    if portrait:
+                        item.setData(Qt.DecorationRole, portrait.scaled(56, 32, Qt.KeepAspectRatio,
+                                                                       Qt.SmoothTransformation))
                 if c == 4:
                     item.setToolTip("Start the session at this game" if d else "")
                     if not d:
@@ -1057,6 +1106,8 @@ class App:
         self.seen = self.read_seen = None  # thumbnails: last look at the MMR box, and last one OCR'd
         threading.Thread(target=ocr_engine, daemon=True).start()  # warm up so the first capture is quick
         self.watcher, self.last_game, self.auto_hidden = GameWatcher(), None, False
+        self.portraits = Portraits()
+        self.portraits.ready.connect(lambda: self.history and self.history.refresh())
         self.after_timer = QTimer(timeout=self.try_after_game)
 
         self.menu = rounded_menu()
