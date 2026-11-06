@@ -1,33 +1,44 @@
 """Dota Rank Tracker: a small always-on-top widget with your MMR and your last 5
 games as W/L boxes with the +/- of each. Ctrl+Shift+E reads your MMR off Dota's
 screen (PaddleOCR's text model); it is also read by itself whenever your Profile page is open.
-Every MMR change is one game. Ctrl+Shift+R hides and shows the widget; click it
+Every MMR change is one game. Ctrl+Shift+R hides and shows the widget (letters changeable); click it
 for the history, where you fix a misread or mark where a session started."""
 
 import ctypes
 import json
 import os
 import re
+import secrets
+import shutil
 import sys
 import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QImage,
                            QPainter, QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QFrame, QHBoxLayout, QHeaderView,
-                               QLabel, QMenu, QPushButton, QStyleFactory, QSystemTrayIcon, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPushButton, QStyleFactory,
+                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DotaRankTracker"
 SETTINGS = DATA_DIR / "settings.json"
+BACKUP_DIR = DATA_DIR / "backups"
 MEDAL = DATA_DIR / "medal.png"  # snapshot of your medal from Dota's screen
 START_SPOT = DATA_DIR / "start_spot.png"  # what the first History click hits (the Dota logo) in the menus
 RETYPE_MS = 10 * 60 * 1000  # no ranked game ends this fast, so a re-capture this soon replaces the last one
-HOTKEYS = {1: 0x52, 2: 0x45, 3: 0x44}  # id -> key: Ctrl+Shift+R hide/show, E capture MMR, D go to History
+# hotkey id -> (setting, what it does, default letter); each is Ctrl+Shift+<letter>, changeable in Hotkeys…
+HOTKEYS = {1: ("hide", "Hide / show the widget", "R"), 2: ("capture", "Capture MMR", "E"),
+           3: ("history", "Go to History + capture", "D")}
+BACKUPS = 7  # days of settings.json copies kept in the backups folder
+GSI_PORT = 3132  # Dota posts its game state here (Turbo Tracker uses 3131)
+GSI_CFG = "gamestate_integration_dotaranktracker.cfg"
+AFTER_GAME_S = 10  # after a game ends, wait this long, then show the widget and go to History
 # s between replayed clicks for Dota's menu to switch pages: measured logo -> profile -> History,
 # 0.4 worked 15/15 (~1.1 s to the MMR), 0.35 failed 2/12, 0.2 and under always failed
 CLICK_GAP = 0.4
@@ -45,6 +56,9 @@ QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; paddi
 #history QLabel { color: #e6e8eb; font: 10pt "Segoe UI"; }
 #history QLabel#dim { color: #8b93a1; font: 9pt "Segoe UI"; }
 #history QLabel#big { font: 700 26pt "Segoe UI"; }
+#history QLineEdit { background: #0b0d11; color: #e6e8eb; border: 1px solid #2c333e; border-radius: 6px;
+                     padding: 4px; font: 600 11pt "Segoe UI"; }
+#history QLineEdit:focus { border-color: #d9a441; }
 #history QLabel#card { border-radius: 10px; padding: 8px; }
 #history QFrame#segbar { background: #151a21; border: 1px solid #2c333e; border-radius: 8px; }
 #history QPushButton#seg { background: transparent; color: #8b93a1; border: 0; border-radius: 6px; padding: 5px 0;
@@ -104,11 +118,40 @@ def migrate(s):
     return s
 
 
+def backup(today=None):
+    """Once a day, before the first save, keep a copy of settings.json; the last BACKUPS days stay."""
+    target = BACKUP_DIR / f"settings-{today or time.strftime('%Y-%m-%d')}.json"
+    if SETTINGS.exists() and not target.exists():
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SETTINGS, target)
+        for old in sorted(BACKUP_DIR.glob("settings-*.json"))[:-BACKUPS]:
+            old.unlink()
+
+
 def save_settings(s):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        backup()
+    except OSError:  # a backup that can't be written must not stop the real save
+        pass
     tmp = SETTINGS.with_suffix(".tmp")
     tmp.write_text(json.dumps(s), "utf-8")
     os.replace(tmp, SETTINGS)  # atomic: a crash mid-save never leaves a half-written file
+
+
+def hotkey_letters(settings):
+    """{setting: letter} with the defaults filled in."""
+    return {name: settings.get("keys", {}).get(name, default) for name, _, default in HOTKEYS.values()}
+
+
+def hotkey_problem(keys):
+    """Why a set of hotkey letters can't be used, or None."""
+    letters = list(keys.values())
+    if any(len(k) != 1 or not k.isalnum() or not k.isascii() for k in letters):
+        return "Each hotkey needs one letter or digit."
+    if len(set(letters)) != len(letters):
+        return "Each action needs its own letter."
+    return None
 
 
 def add_log(log, mmr, now_ms):
@@ -203,6 +246,7 @@ if os.name == "nt":
     U = ctypes.WinDLL("user32", use_last_error=True)
     U.RegisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT)
     U.RegisterHotKey.restype = wintypes.BOOL
+    U.UnregisterHotKey.argtypes = (wintypes.HWND, ctypes.c_int)
     U.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                ctypes.c_int, ctypes.c_int, wintypes.UINT)
     U.SetWindowPos.restype = wintypes.BOOL
@@ -266,6 +310,209 @@ def replay(clicks, gap=CLICK_GAP):
         time.sleep(0.03)
         U.mouse_event(0x0004, 0, 0, 0, 0)  # left up
     U.SetCursorPos(old.x, old.y)
+
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def starts_with_windows(on=None):
+    """Read (on=None) or set the "start with Windows" entry for this exe."""
+    import winreg
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+    with key:
+        if on is None:
+            try:
+                return winreg.QueryValueEx(key, "DotaRankTracker")[0] == f'"{sys.executable}"'
+            except OSError:
+                return False
+        if on:
+            winreg.SetValueEx(key, "DotaRankTracker", 0, winreg.REG_SZ, f'"{sys.executable}"')
+        else:
+            try:
+                winreg.DeleteValue(key, "DotaRankTracker")
+            except OSError:
+                pass
+        return on
+
+
+# --- Dota's game-state feed (Game State Integration) ---------------------------
+# Dota posts JSON to a local address listed in a .cfg in its folder, once launched with
+# -gamestateintegration. Real order (from a recorded match): HERO_SELECTION (no hero yet),
+# STRATEGY_TIME (hero picked) ... GAME_IN_PROGRESS, win_team "radiant"/"dire" when the
+# Ancient falls, POST_GAME. In the menus there's no "map" at all.
+
+GSI_TEMPLATE = """"Dota Rank Tracker"
+{{
+	"uri"       "http://127.0.0.1:{port}/"
+	"timeout"   "5.0"
+	"buffer"    "0.5"
+	"throttle"  "1.0"
+	"heartbeat" "30.0"
+	"auth"
+	{{
+		"token" "{token}"
+	}}
+	"data"
+	{{
+		"provider"  "1"
+		"map"       "1"
+		"player"    "1"
+		"hero"      "1"
+	}}
+}}
+"""
+PICKS_DONE = {"DOTA_GAMERULES_STATE_STRATEGY_TIME", "DOTA_GAMERULES_STATE_TEAM_SHOWCASE",
+              "DOTA_GAMERULES_STATE_WAIT_FOR_MAP_TO_LOAD", "DOTA_GAMERULES_STATE_PRE_GAME",
+              "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS"}
+
+
+class GameWatcher:
+    """Feed it every GSI message; it says ("started", hero) once picks are done and
+    ("ended", hero) when the Ancient falls - once per match, only for games you play."""
+
+    def __init__(self):
+        self.started, self.ended, self.hero = set(), set(), None
+
+    def feed(self, data):
+        game, player = data.get("map") or {}, data.get("player") or {}
+        match = str(game.get("matchid") or "")
+        if not match or match == "0" or player.get("team_name") not in ("radiant", "dire"):
+            return None  # menus, spectating, a demo
+        self.hero = (data.get("hero") or {}).get("name") or self.hero
+        if (game.get("win_team") or "none") != "none":
+            if match not in self.ended:
+                self.ended.add(match)
+                return "ended", self.hero
+        elif game.get("game_state") in PICKS_DONE and match not in self.started:
+            self.started.add(match)
+            return "started", self.hero
+        return None
+
+
+# internal names that don't just read as words
+HERO_NAMES = {
+    "antimage": "Anti-Mage", "abyssal_underlord": "Underlord", "centaur": "Centaur Warrunner",
+    "doom_bringer": "Doom", "furion": "Nature's Prophet", "life_stealer": "Lifestealer", "magnataur": "Magnus",
+    "necrolyte": "Necrophos", "nevermore": "Shadow Fiend", "obsidian_destroyer": "Outworld Destroyer",
+    "queenofpain": "Queen of Pain", "rattletrap": "Clockwerk", "shredder": "Timbersaw",
+    "skeleton_king": "Wraith King", "treant": "Treant Protector", "vengefulspirit": "Vengeful Spirit",
+    "windrunner": "Windranger", "wisp": "Io", "zuus": "Zeus", "keeper_of_the_light": "Keeper of the Light",
+}
+
+
+def hero_name(internal):
+    """npc_dota_hero_furion -> Nature's Prophet."""
+    key = (internal or "").replace("npc_dota_hero_", "")
+    return HERO_NAMES.get(key) or key.replace("_", " ").title()
+
+
+def parse_vdf(text):
+    """Valve's KeyValues text ("key" "value" / "key" { ... }) as nested dicts, keys lower-cased."""
+    tokens = re.findall(r'"((?:[^"\\]|\\.)*)"|([{}])', re.sub(r"//[^\n]*", "", text))
+    root, stack, key = {}, [], None
+    node = root
+    for quoted, brace in tokens:
+        if brace == "{":
+            child = {}
+            if key is not None:
+                node[key.lower()] = child
+            stack.append(node)
+            node, key = child, None
+        elif brace == "}":
+            node = stack.pop() if stack else root
+            key = None
+        elif key is None:
+            key = quoted
+        else:
+            node[key.lower()] = quoted
+            key = None
+    return root
+
+
+def steam_dir():
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+        return Path(winreg.QueryValueEx(key, "SteamPath")[0])
+
+
+def dota_cfg_dir():
+    """Dota's cfg folder in whichever Steam library has it, or None."""
+    try:
+        steam = steam_dir()
+    except OSError:
+        return None
+    libs = [steam]
+    vdf = steam / "steamapps" / "libraryfolders.vdf"
+    if vdf.exists():
+        libs += [Path(v["path"]) for v in parse_vdf(vdf.read_text("utf-8", "ignore")).get("libraryfolders", {}).values()
+                 if isinstance(v, dict) and "path" in v]
+    for lib in libs:
+        cfg = lib / "steamapps" / "common" / "dota 2 beta" / "game" / "dota" / "cfg"
+        if cfg.is_dir():
+            return cfg
+    return None
+
+
+def launch_option_set():
+    """Is -gamestateintegration in Dota's Steam launch options? None if we can't tell."""
+    try:
+        steam = steam_dir()
+    except OSError:
+        return None
+    found = []
+    for f in (steam / "userdata").glob("*/config/localconfig.vdf"):
+        node = parse_vdf(f.read_text("utf-8", "ignore")).get("userlocalconfigstore", {})
+        for part in ("software", "valve", "steam", "apps", "570"):
+            node = node.get(part, {}) if isinstance(node, dict) else {}
+        if isinstance(node, dict) and node:
+            found.append("-gamestateintegration" in str(node.get("launchoptions", "")).split())
+    return any(found) if found else None
+
+
+def setup_gsi(token):
+    """Make sure Dota's cfg folder has our file with this token. Returns a problem to tell
+    the user about, or None."""
+    cfg = dota_cfg_dir()
+    if cfg is None:
+        return "Couldn't find Dota 2 in your Steam folders, so games can't be seen ending."
+    target = cfg / "gamestate_integration" / GSI_CFG
+    text = GSI_TEMPLATE.format(port=GSI_PORT, token=token)
+    try:
+        if not target.exists() or target.read_text("utf-8", "ignore") != text:
+            target.parent.mkdir(exist_ok=True)
+            target.write_text(text, "utf-8")
+    except OSError:
+        return f"Windows blocked writing {target}."
+    if launch_option_set() is False:
+        return ("To capture after each game, add  -gamestateintegration  to Dota's launch options "
+                "(Steam → Dota 2 → Properties), then restart Dota.")
+    return None
+
+
+class GameFeed(QObject):
+    """Listens for Dota's messages on 127.0.0.1 and hands them to the UI thread."""
+    message = Signal(object)
+
+    def start(self, token):
+        feed = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                try:
+                    data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                except ValueError:
+                    data = None
+                ok = isinstance(data, dict) and (data.get("auth") or {}).get("token") == token
+                self.send_response(200 if ok else 403)  # 403: not from our Dota config
+                self.end_headers()
+                if ok:
+                    feed.message.emit(data)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", GSI_PORT), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
 def single_instance():
@@ -467,7 +714,7 @@ class Overlay(QWidget):
             if msg.message == 0x0312 and msg.wParam in HOTKEYS:  # WM_HOTKEY
                 # run after this native handler returns, not nested inside it
                 QTimer.singleShot(0, {1: self.app.toggle_overlay, 2: self.app.capture_mmr,
-                                      3: self.app.history_shortcut}[msg.wParam])
+                                      3: self.app.history_shortcut}[int(msg.wParam)])
                 return True, 0
         return super().nativeEvent(event_type, message)
 
@@ -546,6 +793,48 @@ class Overlay(QWidget):
 
 # --- the history window ------------------------------------------------------
 
+class MmrGraph(QWidget):
+    """Your MMR across the chosen period: a line, a green/red dot per win/loss, the high and low marked."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(120)
+        self.points = []  # [(mmr, +/- or None for the starting point)], oldest first
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(LINE, 1))
+        p.setBrush(QColor("#151a21"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 10, 10)
+        p.setFont(Overlay._font(8))
+        if len(self.points) < 2:
+            p.setPen(DIM)
+            p.drawText(self.rect(), Qt.AlignCenter, "The graph shows up after a couple of games")
+            return
+        mmrs = [m for m, _ in self.points]
+        lo, hi = min(mmrs), max(mmrs)
+        pad = max(10, (hi - lo) * 0.12)
+        lo, hi = lo - pad, hi + pad
+        left, right, top, bottom = 46, self.width() - 14, 12, self.height() - 12
+        xy = [QPoint(int(left + (right - left) * i / (len(mmrs) - 1)),
+                     int(bottom - (bottom - top) * (m - lo) / (hi - lo))) for i, m in enumerate(mmrs)]
+        for value in (max(mmrs), min(mmrs)):  # the high and low, as faint guide lines
+            y = int(bottom - (bottom - top) * (value - lo) / (hi - lo))
+            p.setPen(QPen(QColor(255, 255, 255, 18), 1, Qt.DashLine))
+            p.drawLine(left, y, right, y)
+            p.setPen(DIM)
+            p.drawText(QRect(4, y - 8, left - 10, 16), Qt.AlignRight | Qt.AlignVCenter, f"{value:,}")
+        p.setPen(QPen(QColor("#8b93a1"), 1.6))
+        for a, b in zip(xy, xy[1:]):
+            p.drawLine(a, b)
+        r = 3 if len(xy) > 60 else 4
+        for pt, (_, d) in zip(xy, self.points):
+            p.setPen(Qt.NoPen)
+            p.setBrush(DIM if d is None else WIN if d > 0 else LOSS)
+            p.drawEllipse(pt, r, r)
+
+
 class History(QWidget):
     """Every MMR you captured. Click a number to fix it, ⚑ to start the session at
     that game, × to delete it."""
@@ -556,7 +845,7 @@ class History(QWidget):
         self.setObjectName("history")
         self.setWindowTitle("Dota Rank Tracker")
         self.setWindowIcon(app_icon())
-        self.resize(480, 600)
+        self.resize(540, 760)
         self.big, self.session, self.hint = QLabel(), QLabel(), QLabel(
             "Click an MMR to fix a misread · ⚑ starts the session at that game · × deletes")
         self.big.setObjectName("big")
@@ -564,18 +853,19 @@ class History(QWidget):
         self.hint.setWordWrap(True)
         self.session.setWordWrap(True)
         self.button = QPushButton(clicked=app.toggle_session)
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget(0, 6)  # When, Hero, MMR, +/-, flag, delete
         self.table.setStyle(QStyleFactory.create("Fusion"))  # whole-row tint, not Windows 11's per-cell boxes
-        self.table.setHorizontalHeaderLabels(["When", "MMR", "+/-", "", ""])
+        self.table.setHorizontalHeaderLabels(["When", "Hero", "MMR", "+/-", "", ""])
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(34)
-        self.table.horizontalHeaderItem(0).setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        for c in (0, 1):
+            self.table.horizontalHeaderItem(c).setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.setShowGrid(False)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setEditTriggers(QAbstractItemView.CurrentChanged | QAbstractItemView.DoubleClicked)
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.Stretch)
-        for c, wdt in ((1, 90), (2, 70), (3, 40), (4, 40)):
+        h.setSectionResizeMode(1, QHeaderView.Stretch)
+        for c, wdt in ((0, 130), (2, 70), (3, 60), (4, 36), (5, 36)):
             h.setSectionResizeMode(c, QHeaderView.Fixed)
             self.table.setColumnWidth(c, wdt)
         self.table.itemChanged.connect(self.edited)
@@ -594,6 +884,7 @@ class History(QWidget):
             seg.addWidget(b)
         self.periods.buttonClicked.connect(self.pick_period)
         self.card = QLabel(alignment=Qt.AlignCenter, objectName="card")
+        self.graph = MmrGraph()
 
         self.medal = QLabel()
         top = QHBoxLayout()
@@ -606,6 +897,7 @@ class History(QWidget):
         lay.addLayout(top)
         lay.addWidget(self.picker)
         lay.addWidget(self.card)
+        lay.addWidget(self.graph)
         lay.addWidget(self.session)
         lay.addWidget(self.hint)
         lay.addWidget(self.table)
@@ -647,28 +939,34 @@ class History(QWidget):
         t = self.table
         t.blockSignals(True)
         shown = [i for i in range(len(log)) if log[i]["t"] >= since][::-1]  # newest first
+        first = shown[-1] if shown else len(log)  # graph from the MMR just before the period
+        self.graph.points = [(e["mmr"], None) for e in log[max(0, first - 1):first]] + [
+            (log[i]["mmr"], log[i]["mmr"] - log[i - 1]["mmr"] if i else None) for i in reversed(shown)]
+        self.graph.points = [pt for k, pt in enumerate(self.graph.points)  # repeats of the same MMR aren't games
+                             if k == 0 or pt[1] != 0]
+        self.graph.update()
         t.setRowCount(len(shown))
         for row, i in enumerate(shown):
             e = log[i]
             d = e["mmr"] - log[i - 1]["mmr"] if i else None
             in_session = start is not None and e["t"] >= start and d
-            cells = [(when(e["t"]), DIM), (str(e["mmr"]), TEXT),
+            cells = [(when(e["t"]), DIM), (hero_name(e["hero"]) if e.get("hero") else "", TEXT), (str(e["mmr"]), TEXT),
                      (f"{d:+d}" if d else "–", WIN if d and d > 0 else LOSS if d else DIM),
                      ("⚑", GOLD if e["t"] == start else DIM), ("×", DIM)]
             for c, (text, color) in enumerate(cells):
                 item = QTableWidgetItem(text)
                 item.setForeground(color)
                 item.setData(Qt.UserRole, e["t"])
-                item.setTextAlignment(Qt.AlignCenter if c else Qt.AlignLeft | Qt.AlignVCenter)
-                if c != 1:
+                item.setTextAlignment(Qt.AlignCenter if c > 1 else Qt.AlignLeft | Qt.AlignVCenter)
+                if c != 2:
                     item.setFlags(Qt.ItemIsEnabled)
                 if in_session:
                     item.setBackground(QColor(217, 164, 65, 22))
-                if c == 3:
+                if c == 4:
                     item.setToolTip("Start the session at this game" if d else "")
                     if not d:
                         item.setText("")
-                if c == 4:
+                if c == 5:
                     item.setToolTip("Delete this entry")
                 t.setItem(row, c, item)
         t.blockSignals(False)
@@ -681,7 +979,7 @@ class History(QWidget):
     def edited(self, item):
         v = item.text().strip().replace(",", "")
         log = self.app.mmr_log()
-        if item.column() == 1 and v.isdigit() and int(v) < 20000:
+        if item.column() == 2 and v.isdigit() and int(v) < 20000:
             self.app.set_log([dict(e, mmr=int(v)) if e["t"] == item.data(Qt.UserRole) else e for e in log])
         else:
             QTimer.singleShot(0, self.refresh)  # not a number: put the old one back
@@ -689,10 +987,53 @@ class History(QWidget):
     def clicked(self, row, col):
         item = self.table.item(row, col)
         t = item and item.data(Qt.UserRole)
-        if col == 3 and item.text():
+        if col == 4 and item.text():
             self.app.set_session(t)
-        elif col == 4:
+        elif col == 5:
             self.app.set_log([e for e in self.app.mmr_log() if e["t"] != t])
+
+
+class HotkeyDialog(QDialog):
+    """Pick the letter for each Ctrl+Shift hotkey."""
+
+    def __init__(self, app):
+        super().__init__(None, Qt.WindowStaysOnTopHint)
+        self.app = app
+        self.setObjectName("history")  # same dark look as the history window
+        self.setWindowTitle("Hotkeys")
+        self.setWindowIcon(app_icon())
+        keys = hotkey_letters(app.settings)
+        grid, self.edits = QGridLayout(), {}
+        for row, (name, label, _) in enumerate(HOTKEYS.values()):
+            edit = QLineEdit(keys[name], maxLength=1, alignment=Qt.AlignCenter)
+            edit.setFixedWidth(44)
+            edit.textEdited.connect(lambda text, e=edit: e.setText(text.upper()))
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(QLabel("Ctrl+Shift+", objectName="dim"), row, 1)
+            grid.addWidget(edit, row, 2)
+            self.edits[name] = edit
+        self.error = QLabel(objectName="dim", wordWrap=True)
+        save = QPushButton("Save", clicked=self.save)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.addLayout(grid)
+        lay.addWidget(self.error)
+        lay.addWidget(save, 0, Qt.AlignRight)
+        dark_title_bar(int(self.winId()))
+
+    def save(self):
+        keys = {name: e.text().strip().upper() for name, e in self.edits.items()}
+        problem = hotkey_problem(keys)
+        taken = [] if problem else self.app.register_hotkeys(keys)
+        if problem or taken:
+            if taken:  # put the old ones back
+                self.app.register_hotkeys(hotkey_letters(self.app.settings))
+            self.error.setText(f"<span style='color:#e0533f'>{problem or 'Ctrl+Shift+' + '/'.join(taken) + ' is used by another app. Pick another letter.'}</span>")
+            return
+        self.app.settings["keys"] = keys
+        save_settings(self.app.settings)
+        self.app.update_menu()
+        self.accept()
 
 
 def when(ms):
@@ -715,18 +1056,29 @@ class App:
         self.recording = None  # clicks while recording the way to History
         self.seen = self.read_seen = None  # thumbnails: last look at the MMR box, and last one OCR'd
         threading.Thread(target=ocr_engine, daemon=True).start()  # warm up so the first capture is quick
+        self.watcher, self.last_game, self.auto_hidden = GameWatcher(), None, False
+        self.after_timer = QTimer(timeout=self.try_after_game)
 
         self.menu = rounded_menu()
-        self.toggle_act = QAction("Hide widget\tCtrl+Shift+R", self.menu, triggered=self.toggle_overlay)
+        self.toggle_act = QAction("Hide widget", self.menu, triggered=self.toggle_overlay)
+        self.capture_act = QAction("Capture MMR", self.menu, triggered=self.capture_mmr)
+        self.go_act = QAction("Go to History + capture", self.menu, triggered=self.history_shortcut)
         self.session_act = QAction("Start session", self.menu, triggered=self.toggle_session)
         self.menu.addAction(self.toggle_act)
-        self.menu.addAction(QAction("Capture MMR\tCtrl+Shift+E", self.menu, triggered=self.capture_mmr))
-        self.menu.addAction(QAction("Go to History + capture\tCtrl+Shift+D", self.menu,
-                                    triggered=self.history_shortcut))
+        self.menu.addAction(self.capture_act)
+        self.menu.addAction(self.go_act)
         self.menu.addAction(self.session_act)
         self.menu.addAction(QAction("History", self.menu, triggered=self.open_history))
         self.menu.addAction(QAction("Set MMR + medal screen areas…", self.menu, triggered=self.pick_area))
         self.menu.addAction(QAction("Re-record the way to History…", self.menu, triggered=self.start_recording))
+        self.menu.addAction(QAction("Hotkeys…", self.menu, triggered=self.edit_hotkeys))
+        self.auto_act = QAction("After each game: go to History + capture", self.menu, checkable=True,
+                                triggered=self.set_auto)
+        self.menu.addAction(self.auto_act)
+        self.autostart_act = QAction("Start with Windows", self.menu, checkable=True,
+                                     triggered=lambda on: starts_with_windows(on))
+        if getattr(sys, "frozen", False):  # only the exe can start itself
+            self.menu.addAction(self.autostart_act)
         self.menu.addSeparator()
         self.menu.addAction(QAction("Quit", self.menu, triggered=self.quit))
         self.menu.aboutToShow.connect(self.update_menu)
@@ -740,20 +1092,71 @@ class App:
         self.overlay.show()
         hwnd = int(self.overlay.winId())
         hide_from_capture(hwnd)
-        taken = [chr(vk) for hid, vk in HOTKEYS.items()
-                 if os.name == "nt" and not U.RegisterHotKey(hwnd, hid, 0x0002 | 0x0004 | 0x4000, vk)]
+        taken = self.register_hotkeys(hotkey_letters(self.settings))
         if taken:
-            self.tray.showMessage("Dota Rank Tracker",
-                                  f"Ctrl+Shift+{'/'.join(taken)} is taken by another app; use the tray menu instead.")
+            self.tray.showMessage("Dota Rank Tracker", f"Ctrl+Shift+{'/'.join(taken)} is used by another app. "
+                                  "Right-click the widget → Hotkeys… to pick other letters.")
         if self.settings.get("hidden"):
             self.overlay.hide()
-            self.toggle_act.setText("Show widget\tCtrl+Shift+R")
+        self.update_menu()
 
         # Dota borderless can push itself above us; re-assert topmost now and then
         self.top_timer = QTimer(timeout=lambda: self.overlay.isVisible() and pin_topmost(int(self.overlay.winId())))
         self.top_timer.start(5000)
         self.read_timer = QTimer(timeout=self.auto_read)
         self.read_timer.start(READ_MS)
+        self.start_game_feed()
+
+    def start_game_feed(self):
+        """Hear from Dota when picks are done (hide the widget) and when a game ends."""
+        token = self.settings.setdefault("gsi_token", secrets.token_urlsafe(24))
+        save_settings(self.settings)
+        problem = setup_gsi(token) if os.name == "nt" else None
+        try:
+            self.feed = GameFeed()
+            self.feed.message.connect(self.on_game)
+            self.feed.start(token)
+        except OSError:
+            problem = f"Port {GSI_PORT} is in use by another program, so games can't be seen ending."
+        if problem:
+            self.tray.showMessage("Dota Rank Tracker", problem)
+
+    def on_game(self, data):
+        event = self.watcher.feed(data)
+        if not event:
+            return
+        kind, hero = event
+        if kind == "started":  # picks are done: get out of the way for the match
+            if self.overlay.isVisible():
+                self.overlay.hide()
+                self.auto_hidden = True
+        else:
+            self.last_game = {"hero": hero, "t": int(time.time() * 1000)}
+            QTimer.singleShot(AFTER_GAME_S * 1000, self.after_game)
+
+    def after_game(self):
+        """A few seconds after the Ancient falls: widget back, then to History once the menu shows."""
+        if self.auto_hidden:
+            self.overlay.show()
+            pin_topmost(int(self.overlay.winId()))
+            self.auto_hidden = False
+        if self.settings.get("auto_after_game", True):
+            self.after_until = time.time() + 20 * 60  # the post-game screen can stay up a while
+            self.after_timer.start(2000)
+            self.try_after_game()
+
+    def try_after_game(self):
+        clicks, log = self.settings.get("history_clicks"), self.mmr_log()
+        done = log and self.last_game and log[-1]["t"] > self.last_game["t"]  # captured already
+        if not clicks or not START_SPOT.exists() or done or time.time() > self.after_until:
+            return self.after_timer.stop()
+        if self.recording is None and not self.asking and self.in_menus(clicks):
+            self.after_timer.stop()
+            self.go_history(clicks, CLICK_GAP)
+
+    def set_auto(self, on):
+        self.settings["auto_after_game"] = on
+        save_settings(self.settings)
 
     def place(self):
         geo = self.qt.primaryScreen().availableGeometry()
@@ -765,7 +1168,28 @@ class App:
 
 
     def update_menu(self):
+        keys = hotkey_letters(self.settings)
+        self.toggle_act.setText(f"{'Hide' if self.overlay.isVisible() else 'Show'} widget\tCtrl+Shift+{keys['hide']}")
+        self.capture_act.setText(f"Capture MMR\tCtrl+Shift+{keys['capture']}")
+        self.go_act.setText(f"Go to History + capture\tCtrl+Shift+{keys['history']}")
         self.session_act.setText("End session" if self.session_start() else "Start session")
+        self.auto_act.setChecked(self.settings.get("auto_after_game", True))
+        if getattr(sys, "frozen", False):
+            self.autostart_act.setChecked(starts_with_windows())
+
+    def register_hotkeys(self, keys):
+        """(Re)claim Ctrl+Shift+<letter> for each action; returns the letters another app holds."""
+        if os.name != "nt":
+            return []
+        hwnd, taken = int(self.overlay.winId()), []
+        for hid, (name, _, _) in HOTKEYS.items():
+            U.UnregisterHotKey(hwnd, hid)
+            if not U.RegisterHotKey(hwnd, hid, 0x0002 | 0x0004 | 0x4000, ord(keys[name].upper())):
+                taken.append(keys[name].upper())
+        return taken
+
+    def edit_hotkeys(self):
+        HotkeyDialog(self).exec()
 
     def icon(self):
         return QIcon(self.medal) if self.medal else app_icon()
@@ -796,7 +1220,11 @@ class App:
         self._changed()
 
     def save_mmr(self, value):
-        self.set_log(add_log(self.mmr_log(), value, int(time.time() * 1000)))
+        log = add_log(self.mmr_log(), value, int(time.time() * 1000))
+        game = self.last_game
+        if game and game["hero"] and (len(log) < 2 or log[-2]["t"] < game["t"]):  # ended since the last capture
+            log[-1] = dict(log[-1], hero=game["hero"])
+        self.set_log(log)
 
     def auto_read(self):
         """While Dota is in front, OCR the MMR box once it holds still (a menu page, not the moving
@@ -957,12 +1385,13 @@ class App:
 
     def toggle_overlay(self):
         show = not self.overlay.isVisible()
+        self.auto_hidden = False  # your choice wins over the in-game hide
         self.overlay.setVisible(show)
         if show:
             pin_topmost(int(self.overlay.winId()))
         self.settings["hidden"] = not show
         save_settings(self.settings)
-        self.toggle_act.setText(("Hide" if show else "Show") + " widget\tCtrl+Shift+R")
+        self.update_menu()
 
     def open_history(self):
         if not self.history:

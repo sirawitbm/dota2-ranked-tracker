@@ -86,4 +86,38 @@ logo = np.random.default_rng(1).integers(0, 255, (48, 48, 3), dtype=np.uint8)
 glow = np.clip(logo.astype(int) + 8, 0, 255).astype(np.uint8)  # the logo's animated glow
 game = np.random.default_rng(2).integers(0, 255, (48, 48, 3), dtype=np.uint8)  # a match there
 assert looks_like(logo, glow) and not looks_like(logo, game) and not looks_like(logo, logo[:40])
+
+# Dota's game feed, in the order a real match sends it: hide once picks are done, act when the Ancient falls
+import rank_overlay as ro  # noqa: E402
+
+
+def msg(state, win="none", hero="npc_dota_hero_furion", match="9070038408", team="radiant"):
+    return {"map": {"matchid": match, "game_state": "DOTA_GAMERULES_STATE_" + state, "win_team": win},
+            "player": {"team_name": team}, "hero": {"name": hero} if hero else {}}
+
+
+w = ro.GameWatcher()
+seen = [w.feed(m) for m in (msg("HERO_SELECTION", hero=None), msg("STRATEGY_TIME"), msg("PRE_GAME"),
+                            msg("GAME_IN_PROGRESS"), msg("GAME_IN_PROGRESS", "dire"), msg("POST_GAME", "dire"), {})]
+assert [e for e in seen if e] == [("started", "npc_dota_hero_furion"), ("ended", "npc_dota_hero_furion")]
+assert w.feed(msg("STRATEGY_TIME", match="0")) is None  # a demo
+assert w.feed(msg("STRATEGY_TIME", match="1", team=None)) is None  # watching someone else's game
+assert ro.hero_name("npc_dota_hero_furion") == "Nature's Prophet" and ro.hero_name("npc_dota_hero_dark_willow") == "Dark Willow"
+
+# hotkeys: one letter or digit each, all different
+assert ro.hotkey_letters({}) == {"hide": "R", "capture": "E", "history": "D"}
+assert ro.hotkey_letters({"keys": {"history": "A"}})["history"] == "A"
+assert ro.hotkey_problem({"hide": "R", "capture": "E", "history": "A"}) is None
+assert ro.hotkey_problem({"hide": "R", "capture": "R", "history": "A"}) and ro.hotkey_problem({"hide": "", "capture": "E", "history": "A"})
+
+# daily backups: one copy a day, the last 7 kept
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+tmp = Path(tempfile.mkdtemp())
+ro.SETTINGS, ro.BACKUP_DIR = tmp / "settings.json", tmp / "backups"
+ro.SETTINGS.write_text("{}")
+for day in range(1, 11):
+    ro.backup(f"2026-11-{day:02d}")
+    ro.backup(f"2026-11-{day:02d}")  # a second save that day changes nothing
+assert sorted(f.name for f in ro.BACKUP_DIR.iterdir()) == [f"settings-2026-11-{d:02d}.json" for d in range(4, 11)]
 print("ok")

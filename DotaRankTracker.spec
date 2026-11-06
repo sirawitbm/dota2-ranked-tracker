@@ -3,7 +3,7 @@
 a = Analysis(
     ["rank_overlay.py"],
     datas=[("models/PP-OCRv6_rec_tiny.onnx", "models")],
-    excludes=["rapidocr", "cv2", "PIL", "winrt", "ssl", "urllib.request", "http.client"],
+    excludes=["rapidocr", "cv2", "PIL", "winrt", "ssl", "urllib.request"],
 )
 
 # software OpenGL, QML/Quick, PDF, SVG, network/TLS, image formats, translations, OpenSSL
