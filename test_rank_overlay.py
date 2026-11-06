@@ -30,14 +30,17 @@ assert period_start(1, now) == period_start(0, now) and period_start(None, now) 
 assert summary(log, period_start(None, now)) == summary(log, 0)
 # a period the log doesn't reach back to shows "—" (not a number that's really a shorter period),
 # and so does one with no games in it
-from rank_overlay import period_box  # noqa: E402
+from rank_overlay import covers, period_box  # noqa: E402
 D = 86_400_000
 six = [{"t": now - 6 * D + 3_600_000, "mmr": 5400}, {"t": now - 2 * D, "mmr": 5430}, {"t": now - 3_600_000, "mmr": 5405}]
+# only periods the log covers can be picked; Today and All always can
+assert [covers(six, d, now) for d in (0, 3, 7, 30, None)] == [True, True, False, False, True]
+assert covers([], 0, now) and covers([], None, now) and not covers([], 7, now)
 assert period_box(six, 30, now) == ("empty", "—", "6 days so far")
 assert period_box(six, 7, now) == ("empty", "—", "6 days so far")
-assert period_box(six, 3, now) == ("up", "+5", "1–1")
-assert period_box(six, None, now) == ("up", "+5", "1–1")
-assert period_box(six, 0, now) == ("down", "-25", "0–1")
+assert period_box(six, 3, now) == ("up", "+5", "1–1 · 50% wins · 2 games")
+assert period_box(six, None, now) == ("up", "+5", "1–1 · 50% wins · 2 games")
+assert period_box(six, 0, now) == ("down", "-25", "0–1 · 0% wins · 1 game")
 assert period_box(six[:2], 0, now) == ("empty", "—", "no games")
 assert period_box([], 7, now) == ("empty", "—", "no data") and period_box([], None, now) == ("empty", "—", "no games")
 assert period_box([{"t": now - 3_600_000, "mmr": 1}], 7, now)[2] == "1 day so far"

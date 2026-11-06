@@ -17,9 +17,9 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QImage,
                            QPainter, QPainterPath, QPen, QPixmap)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QLabel, QMenu,
-                               QPushButton, QStyleFactory, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QFrame, QHBoxLayout, QHeaderView,
+                               QLabel, QMenu, QPushButton, QStyleFactory, QSystemTrayIcon, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DotaRankTracker"
@@ -45,7 +45,13 @@ QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; paddi
 #history QLabel { color: #e6e8eb; font: 10pt "Segoe UI"; }
 #history QLabel#dim { color: #8b93a1; font: 9pt "Segoe UI"; }
 #history QLabel#big { font: 700 26pt "Segoe UI"; }
-#history QLabel#tile { border-radius: 8px; padding: 6px 2px; }
+#history QLabel#card { border-radius: 10px; padding: 8px; }
+#history QFrame#segbar { background: #151a21; border: 1px solid #2c333e; border-radius: 8px; }
+#history QPushButton#seg { background: transparent; color: #8b93a1; border: 0; border-radius: 6px; padding: 5px 0;
+                           font: 9pt "Segoe UI"; }
+#history QPushButton#seg:hover { color: #e6e8eb; }
+#history QPushButton#seg:checked { background: #2a303b; color: #e6e8eb; font: 600 9pt "Segoe UI"; }
+#history QPushButton#seg:disabled { color: #4a5260; }
 #history QPushButton { background: #c23b2a; color: #ffffff; border: 0; border-radius: 8px; padding: 8px 16px;
                        font: 600 10pt "Segoe UI"; }
 #history QPushButton:hover { background: #d4493a; }
@@ -56,7 +62,7 @@ QHeaderView::section { background: #0e1116; color: #8b93a1; border: 0; border-bo
                        padding: 6px 4px; font: 9pt "Segoe UI"; }
 """
 
-# history period boxes, in the widget's W/L box colours
+# history period card, in the widget's W/L box colours
 TILE_LOOK = {
     "up": "background: rgba(76, 194, 107, 30); border: 1px solid rgba(76, 194, 107, 150);",
     "down": "background: rgba(224, 83, 63, 30); border: 1px solid rgba(224, 83, 63, 150);",
@@ -119,7 +125,7 @@ def games(log):
             for prev, cur in zip(log, log[1:]) if cur["mmr"] != prev["mmr"]]
 
 
-PERIODS = (("Today", 0), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("All time", None))
+PERIODS = (("Today", 0), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("All", None))
 DAY_STARTS = 6  # the day rolls over at 6 am, so a late-night session still counts as that evening
 
 
@@ -133,17 +139,22 @@ def period_start(days, now_ms):
     return int(time.mktime((t.tm_year, t.tm_mon, day, DAY_STARTS, 0, 0, 0, 0, -1)) * 1000)
 
 
+def covers(log, days, now_ms):
+    """The log reaches back far enough to measure this period (Today and All always do)."""
+    return not days or bool(log) and log[0]["t"] <= period_start(days, now_ms)
+
+
 def period_box(log, days, now_ms):
-    """What a period box shows: (look, big text, small text). A period your log doesn't reach
+    """What the period card shows: (look, big text, small text). A period your log doesn't reach
     back to yet is "—" rather than a number that's really a shorter period."""
-    start = period_start(days, now_ms)
-    if days and (not log or log[0]["t"] > start):
+    if not covers(log, days, now_ms):
         so_far = -(-(now_ms - log[0]["t"]) // 86_400_000) if log else 0  # whole days, rounded up
         return "empty", "—", f"{so_far} day{'s' * (so_far != 1)} so far" if log else "no data"
-    w, l, total = summary(log, start)
+    w, l, total = summary(log, period_start(days, now_ms))
     if not w + l:
         return "empty", "—", "no games"
-    return ("up" if total > 0 else "down" if total < 0 else "flat"), f"{total:+d}", f"{w}–{l}"
+    look = "up" if total > 0 else "down" if total < 0 else "flat"
+    return look, f"{total:+d}", f"{w}–{l} · {round(100 * w / (w + l))}% wins · {w + l} game{'s' * (w + l != 1)}"
 
 
 def summary(log, since):
@@ -570,12 +581,19 @@ class History(QWidget):
         self.table.itemChanged.connect(self.edited)
         self.table.cellClicked.connect(self.clicked)
 
-        self.tiles = QHBoxLayout()  # +/- and W-L over a few periods, side by side
-        self.tiles.setSpacing(6)
-        for _ in PERIODS:
-            tile = QLabel(alignment=Qt.AlignCenter)
-            tile.setObjectName("tile")
-            self.tiles.addWidget(tile)
+        # pick a period; the card and the table show just that period
+        self.picker = QFrame(objectName="segbar")
+        seg = QHBoxLayout(self.picker)
+        seg.setContentsMargins(3, 3, 3, 3)
+        seg.setSpacing(2)
+        self.periods = QButtonGroup(self)
+        for name, days in PERIODS:
+            b = QPushButton(name, objectName="seg", checkable=True, cursor=Qt.PointingHandCursor)
+            b.setProperty("days", days)
+            self.periods.addButton(b)
+            seg.addWidget(b)
+        self.periods.buttonClicked.connect(self.pick_period)
+        self.card = QLabel(alignment=Qt.AlignCenter, objectName="card")
 
         self.medal = QLabel()
         top = QHBoxLayout()
@@ -586,7 +604,8 @@ class History(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 16, 18, 18)
         lay.addLayout(top)
-        lay.addLayout(self.tiles)
+        lay.addWidget(self.picker)
+        lay.addWidget(self.card)
         lay.addWidget(self.session)
         lay.addWidget(self.hint)
         lay.addWidget(self.table)
@@ -607,19 +626,29 @@ class History(QWidget):
                                  "one there, or Start session to start from now.</span>")
         self.button.setText("End session" if start else "Start session")
         now = int(time.time() * 1000)
-        for i, (name, days) in enumerate(PERIODS):
-            look, big, small = period_box(log, days, now)
-            tile = self.tiles.itemAt(i).widget()
-            tile.setStyleSheet(TILE_LOOK[look])  # like the widget's W/L boxes: tinted up/down, dashed when empty
-            color = {"up": WIN, "down": LOSS, "flat": TEXT, "empty": DIM}[look].name()
-            tile.setText(f"<div style='color:#8b93a1; font-size:8pt'>{name}</div>"
-                         f"<div style='color:{color}; font-size:15pt; font-weight:700'>{big}</div>"
-                         f"<div style='color:#8b93a1; font-size:8pt'>{small}</div>")
+        days = self.app.settings.get("period")
+        if not covers(log, days, now):  # remembered a period the log doesn't reach (yet): show all
+            days = None
+        for b in self.periods.buttons():
+            d = b.property("days")
+            b.setEnabled(covers(log, d, now))
+            b.setChecked(d == days)
+            b.setToolTip("" if b.isEnabled() else f"Only {period_box(log, d, now)[2]} of data")
+        since = period_start(days, now)
+        look, big, small = period_box(log, days, now)
+        self.card.setStyleSheet(TILE_LOOK[look])  # like the widget's W/L boxes: tinted up or down
+        color = {"up": WIN, "down": LOSS, "flat": TEXT, "empty": DIM}[look].name()
+        start_text = f"since {when(since)}" if days is not None else (
+            f"since your first capture, {when(log[0]['t'])}" if log else "")
+        self.card.setText(f"<div style='color:{color}; font-size:22pt; font-weight:700'>{big}</div>"
+                          f"<div style='color:#e6e8eb; font-size:9pt'>{small}</div>"
+                          f"<div style='color:#8b93a1; font-size:8pt'>{start_text}</div>")
 
         t = self.table
         t.blockSignals(True)
-        t.setRowCount(len(log))
-        for row, i in enumerate(range(len(log) - 1, -1, -1)):  # newest first
+        shown = [i for i in range(len(log)) if log[i]["t"] >= since][::-1]  # newest first
+        t.setRowCount(len(shown))
+        for row, i in enumerate(shown):
             e = log[i]
             d = e["mmr"] - log[i - 1]["mmr"] if i else None
             in_session = start is not None and e["t"] >= start and d
@@ -643,6 +672,11 @@ class History(QWidget):
                     item.setToolTip("Delete this entry")
                 t.setItem(row, c, item)
         t.blockSignals(False)
+
+    def pick_period(self, button):
+        self.app.settings["period"] = button.property("days")
+        save_settings(self.app.settings)
+        self.refresh()
 
     def edited(self, item):
         v = item.text().strip().replace(",", "")
