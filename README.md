@@ -2,7 +2,7 @@
 
 A small always-on-top widget for Dota 2 ranked. It shows your medal and MMR, your last 5 games as W/L boxes with the **MMR +/- of each one**, and your session total. It reads your MMR straight off Dota's screen, so you see the change the moment you open your profile, with no waiting for Dota Plus.
 
-![widget](docs/widget.png)
+![Floating widget showing the last five W/L results and the green Auto toggle](docs/widget.png)
 
 ## Download
 
@@ -63,7 +63,7 @@ The three hotkeys are Ctrl+Shift plus a letter; change the letters under right-c
 - In the history window, pick a period (**Today, 7 days, 30 days, 90 days or All**): the card shows its MMR +/-, W–L and win %, a graph shows your MMR game by game, and the list shows just those games. A day runs from 6 am to 6 am, so a late-night session counts as that evening. Periods your log doesn't reach back to yet are greyed out.
 - Open **By day** in History to see each day's wins, losses, win rate and MMR change, newest first. It follows the selected period and shows days with recorded games. The date is the day the 6 am window starts: a game captured at 3 am Tuesday counts toward Monday, while a game at 6 am Tuesday counts toward Tuesday. Return to **Matches** to fix or delete individual captures.
 
-![history](docs/history.png)
+![History with By day selected, showing sample daily wins, losses, win rate, and MMR change](docs/history.png)
 
 ## Your medal
 
