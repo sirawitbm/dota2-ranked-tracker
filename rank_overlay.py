@@ -23,8 +23,10 @@ from PySide6.QtGui import (QAction, QColor, QCursor, QFont, QFontMetrics, QIcon,
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPushButton, QStyleFactory,
-                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
+VERSION = "0.4.3"
+APP_TITLE = f"Dota Rank Tracker v{VERSION}"
 HERE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DotaRankTracker"
 SETTINGS = DATA_DIR / "settings.json"
@@ -39,13 +41,15 @@ HOTKEYS = {1: ("hide", "Hide / show the widget", "R"), 2: ("capture", "Capture M
            3: ("history", "Go to History + capture", "D")}
 BACKUPS = 7  # days of settings.json copies kept in the backups folder
 GSI_PORT = 3132  # Dota posts its game state here (Turbo Tracker uses 3131)
+RECENT_MATCHES = 32  # only recent matches are needed to suppress duplicate GSI events
 GSI_CFG = "gamestate_integration_dotaranktracker.cfg"
 AFTER_GAME_S = 10  # after a game ends, wait this long, then show the widget and go to History
 # s between replayed clicks for Dota's menu to switch pages: measured logo -> profile -> History,
 # 0.4 worked 15/15 (~1.1 s to the MMR), 0.35 failed 2/12, 0.2 and under always failed
 CLICK_GAP = 0.4
 READ_MS = 4000  # how often the MMR box is looked at while Dota is in front
-MAX_JUMP = 300  # an auto-read further than this from the last log is a misread (~10 games)
+READ_RETRY_S = 15  # retry a failed read without repeatedly OCR'ing an unchanged wrong page
+MAX_JUMP = 100  # a larger change from the last log is treated as an OCR misread
 
 # menu and history window in the widget's colours instead of the plain Windows look
 STYLE = """
@@ -54,6 +58,10 @@ QMenu::item { padding: 7px 28px 7px 14px; border-radius: 6px; }
 QMenu::item:selected { background: #2a303b; }
 QMenu::separator { height: 1px; background: #2c333e; margin: 5px 8px; }
 QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; padding: 6px; }
+QPushButton#autoCapture { background: #1d222b; color: #a7afbc; border: 1px solid #414a59;
+                          border-radius: 6px; font: 600 7pt "Segoe UI"; }
+QPushButton#autoCapture:checked { background: #20392b; color: #9de3ae; border-color: #3a7450; }
+QPushButton#autoCapture:hover { border-color: #a7afbc; }
 #history { background: #0e1116; }
 #history QLabel { color: #e6e8eb; font: 10pt "Segoe UI"; }
 #history QLabel#dim { color: #8b93a1; font: 9pt "Segoe UI"; }
@@ -71,6 +79,9 @@ QToolTip { background: #171b22; color: #e6e8eb; border: 1px solid #2c333e; paddi
 #history QPushButton { background: #c23b2a; color: #ffffff; border: 0; border-radius: 8px; padding: 8px 16px;
                        font: 600 10pt "Segoe UI"; }
 #history QPushButton:hover { background: #d4493a; }
+#history QTabWidget::pane { border: 0; }
+#history QTabBar::tab { background: #151a21; color: #8b93a1; padding: 7px 16px; font: 9pt "Segoe UI"; }
+#history QTabBar::tab:selected { background: #2a303b; color: #e6e8eb; }
 QTableWidget { background: #0e1116; color: #e6e8eb; border: 1px solid #2c333e; border-radius: 8px;
                gridline-color: transparent; font: 10pt "Segoe UI"; selection-background-color: #2a303b; }
 QTableWidget QLineEdit { background: #0b0d11; color: #e6e8eb; border: 1px solid #d9a441; padding: 2px 6px; }
@@ -221,6 +232,18 @@ def summary(log, since):
     return wins, len(ds) - wins, sum(ds)
 
 
+def daily_results(log, since=0):
+    """(day start, wins, losses, MMR change), newest first; days run 6 am to 6 am."""
+    days = {}
+    for t, _, delta in games(log):
+        if t < since:
+            continue
+        day = period_start(0, t)
+        wins, losses, total = days.get(day, (0, 0, 0))
+        days[day] = wins + (delta > 0), losses + (delta < 0), total + delta
+    return [(day, *days[day]) for day in sorted(days, reverse=True)]
+
+
 def number(text):
     """The one number in OCR text ("4,002" or "MMR 4002" -> 4002). None if there is no
     number or several (in-game K/D/A "5/3/10", clock "12:34")."""
@@ -238,9 +261,12 @@ def accept(log, value):
 
 
 def believable(log, value, manual):
-    """A read that really is your MMR: you pressed capture, or it's your last MMR or a believable
-    change from it (an automatic read can land on any page that shows a number)."""
-    return value is not None and (manual or accept(log, value) or bool(log) and value == log[-1]["mmr"])
+    """Allow a manual first reading; after that, reject readings more than MAX_JUMP from the log."""
+    if value is None:
+        return False
+    if not log:
+        return manual
+    return value == log[-1]["mmr"] or abs(value - log[-1]["mmr"]) <= MAX_JUMP
 
 
 def same(a, b):
@@ -385,21 +411,26 @@ class GameWatcher:
     ("ended", hero) when the Ancient falls - once per match, only for games you play."""
 
     def __init__(self):
-        self.started, self.ended, self.hero = set(), set(), None
+        self.matches = {}
 
     def feed(self, data):
         game, player = data.get("map") or {}, data.get("player") or {}
         match = str(game.get("matchid") or "")
         if not match or match == "0" or player.get("team_name") not in ("radiant", "dire"):
             return None  # menus, spectating, a demo
-        self.hero = (data.get("hero") or {}).get("name") or self.hero
+        if match not in self.matches:
+            if len(self.matches) >= RECENT_MATCHES:
+                del self.matches[next(iter(self.matches))]
+            self.matches[match] = {"started": False, "ended": False, "hero": None}
+        state = self.matches[match]
+        state["hero"] = (data.get("hero") or {}).get("name") or state["hero"]
         if (game.get("win_team") or "none") != "none":
-            if match not in self.ended:
-                self.ended.add(match)
-                return "ended", self.hero
-        elif game.get("game_state") in PICKS_DONE and match not in self.started:
-            self.started.add(match)
-            return "started", self.hero
+            if not state["ended"]:
+                state["ended"] = True
+                return "ended", state["hero"]
+        elif game.get("game_state") in PICKS_DONE and not state["started"] and not state["ended"]:
+            state["started"] = True
+            return "started", state["hero"]
         return None
 
 
@@ -602,8 +633,15 @@ def ocr_engine():
     global _ocr
     with _ocr_lock:
         if _ocr is None:
+            if not MODEL.is_file():
+                raise FileNotFoundError(f"OCR model not found: {MODEL}")
             import onnxruntime  # slow import (~1 s), so it's warmed up at start
-            sess = onnxruntime.InferenceSession(str(MODEL), providers=["CPUExecutionProvider"])
+            from onnxruntime.capi import onnxruntime_pybind11_state as ort
+            try:
+                sess = onnxruntime.InferenceSession(str(MODEL), providers=["CPUExecutionProvider"])
+            except (ort.Fail, ort.InvalidArgument, ort.InvalidGraph, ort.InvalidProtobuf, ort.NoSuchFile,
+                    ort.NotFound, ort.NotImplemented, ort.RuntimeException, ort.EPFail) as exc:
+                raise RuntimeError(f"Couldn't load OCR model: {exc}") from exc
             _ocr = sess, ["blank"] + sess.get_modelmeta().custom_metadata_map["character"].split("\n") + [" "]
         return _ocr
 
@@ -639,16 +677,19 @@ def recognize(img, box):
     line = img.copy(x, y, min(img.width(), right + pad) - x, min(img.height(), bottom + pad) - y)
     a = pixels(line.scaledToHeight(48, Qt.SmoothTransformation))[:, :, ::-1] / 127.5 - 1  # BGR in -1..1
     sess, chars = ocr_engine()
-    idx = sess.run(None, {"x": a.transpose(2, 0, 1)[None].astype("float32")})[0][0].argmax(axis=1)
+    from onnxruntime.capi import onnxruntime_pybind11_state as ort
+    try:
+        output = sess.run(None, {"x": a.transpose(2, 0, 1)[None].astype("float32")})
+    except (ort.Fail, ort.InvalidArgument, ort.RuntimeException, ort.EPFail, ort.EngineError,
+            ort.DeviceReset, ort.NotImplemented) as exc:
+        raise RuntimeError(f"OCR recognition failed: {exc}") from exc
+    idx = output[0][0].argmax(axis=1)
     return "".join(chars[i] for k, i in enumerate(idx) if i and (k == 0 or i != idx[k - 1]))  # CTC decode
 
 
 def read_number(img):
-    """The MMR in a screenshot, or None. Safe off the UI thread."""
-    try:
-        return number(" ".join(recognize(img, b) for b in text_lines(pixels(img))))
-    except Exception:  # odd image, model missing, ... - just no reading this time
-        return None
+    """The MMR in a screenshot, or None if no number is found; processing errors propagate."""
+    return number(" ".join(recognize(img, b) for b in text_lines(pixels(img))))
 
 
 def cut_out(img):
@@ -663,9 +704,25 @@ def cut_out(img):
 
 class Reader(QObject):
     done = Signal(object, object, str)  # MMR or None, medal snapshot taken with it, "auto" / "manual"
+    error = Signal(str, str)  # diagnostic, "auto" / "manual" / "startup"
+
+    def warm_up(self):
+        def work():
+            try:
+                ocr_engine()
+            except (ImportError, OSError, ValueError, RuntimeError, KeyError) as exc:
+                self.error.emit(f"{type(exc).__name__}: {exc}", "startup")
+        threading.Thread(target=work, daemon=True).start()
 
     def run(self, mmr_img, medal_img, mode):
-        threading.Thread(target=lambda: self.done.emit(read_number(mmr_img), medal_img, mode), daemon=True).start()
+        def work():
+            try:
+                value = read_number(mmr_img)
+            except (ImportError, OSError, ValueError, RuntimeError, KeyError) as exc:
+                self.error.emit(f"{type(exc).__name__}: {exc}", mode)
+            else:
+                self.done.emit(value, medal_img, mode)
+        threading.Thread(target=work, daemon=True).start()
 
 
 class AreaPicker(QWidget):
@@ -722,7 +779,9 @@ class AreaPicker(QWidget):
 # --- the small widget ------------------------------------------------------
 
 class Overlay(QWidget):
-    W, H = 248, 90
+    W, H = 270, 90
+    TILES_X, TILES_Y = 84, 40
+    TILE_COUNT, TILE_SIZE, TILE_GAP = 5, 24, 5
 
     def __init__(self, app):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -735,6 +794,19 @@ class Overlay(QWidget):
         self.setToolTip("Click: history · Drag: move · Ctrl+Shift+E: capture · Ctrl+Shift+D: History + capture · Ctrl+Shift+R: hide")
         self.note = None  # (text, colour) under the MMR for a moment after a capture
         self._press = None
+        self.auto_button = QPushButton("Auto", parent=self, objectName="autoCapture", checkable=True,
+                                       focusPolicy=Qt.NoFocus, cursor=Qt.PointingHandCursor)
+        tiles_right = self.TILES_X + self.TILE_COUNT * (self.TILE_SIZE + self.TILE_GAP) - self.TILE_GAP
+        self.auto_button.setGeometry(tiles_right + 8, self.TILES_Y, 28, self.TILE_SIZE)
+        self.auto_button.setAccessibleName("After-match auto capture")
+        self.auto_button.setToolTip("Automatically open Dota's History and capture MMR after a match. "
+                                    "Manual capture shortcuts still work when off.")
+        self.update_auto()
+        self.auto_button.clicked.connect(app.set_auto)
+
+    def update_auto(self):
+        on = self.app.settings.get("auto_after_game", True)
+        self.auto_button.setChecked(on)
 
     # click opens history, drag moves
     def mousePressEvent(self, e):
@@ -796,7 +868,7 @@ class Overlay(QWidget):
         p.drawText(QRectF(0, 66, 80, 18), Qt.AlignCenter, text)
 
         # right, top: session (or today) W-L and MMR total
-        x, right = 84, self.W - 12
+        x, right = self.TILES_X, self.W - 12
         start = self.app.session_start()
         w, l, total = summary(log, start or period_start(0, int(time.time() * 1000)))
         parts = [(f"{'session' if start else 'today'} {w}–{l}", DIM)]
@@ -810,9 +882,9 @@ class Overlay(QWidget):
             tx += QFontMetrics(p.font()).horizontalAdvance(text)
 
         # right: last 5 games, newest on the left
-        last = games(log)[::-1][:5]
-        size, gap, y = 24, 5, 40
-        for i in range(5):
+        last = games(log)[::-1][:self.TILE_COUNT]
+        size, gap, y = self.TILE_SIZE, self.TILE_GAP, self.TILES_Y
+        for i in range(self.TILE_COUNT):
             r = QRectF(x + i * (size + gap), y, size, size)
             if i < len(last):
                 d = last[i][2]
@@ -896,7 +968,7 @@ class History(QWidget):
         super().__init__()
         self.app = app
         self.setObjectName("history")
-        self.setWindowTitle("Dota Rank Tracker")
+        self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
         self.resize(540, 760)
         self.big, self.session, self.hint = QLabel(), QLabel(), QLabel(
@@ -924,6 +996,28 @@ class History(QWidget):
             self.table.setColumnWidth(c, wdt)
         self.table.itemChanged.connect(self.edited)
         self.table.cellClicked.connect(self.clicked)
+
+        self.daily_table = QTableWidget(0, 5)
+        self.daily_table.setHorizontalHeaderLabels(["Day", "Wins", "Losses", "Win %", "MMR +/-"])
+        self.daily_table.verticalHeader().hide()
+        self.daily_table.verticalHeader().setDefaultSectionSize(38)
+        self.daily_table.setShowGrid(False)
+        self.daily_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.daily_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.daily_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for c, width in ((1, 55), (2, 55), (3, 60), (4, 80)):
+            self.daily_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.Fixed)
+            self.daily_table.setColumnWidth(c, width)
+        self.daily_hint = QLabel("Days run from 6 am to 6 am. A 3 am game belongs to the previous day.",
+                                 objectName="dim", wordWrap=True)
+        daily = QWidget()
+        daily_layout = QVBoxLayout(daily)
+        daily_layout.setContentsMargins(0, 8, 0, 0)
+        daily_layout.addWidget(self.daily_hint)
+        daily_layout.addWidget(self.daily_table)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.table, "Matches")
+        self.tabs.addTab(daily, "By day")
 
         # pick a period; the card and the table show just that period
         self.picker = QFrame(objectName="segbar")
@@ -954,7 +1048,7 @@ class History(QWidget):
         lay.addWidget(self.graph)
         lay.addWidget(self.session)
         lay.addWidget(self.hint)
-        lay.addWidget(self.table)
+        lay.addWidget(self.tabs)
 
     def refresh(self):
         log, start = self.app.mmr_log(), self.app.session_start()
@@ -1031,6 +1125,22 @@ class History(QWidget):
                     item.setToolTip("Delete this entry")
                 t.setItem(row, c, item)
         t.blockSignals(False)
+
+        rows = daily_results(log, since)
+        self.daily_table.setRowCount(len(rows))
+        for row, (day, wins, losses, total) in enumerate(rows):
+            cells = [(time.strftime("%a %d %b %Y", time.localtime(day / 1000)), TEXT),
+                     (str(wins), WIN), (str(losses), LOSS),
+                     (f"{round(100 * wins / (wins + losses))}%", TEXT),
+                     (f"{total:+d}", WIN if total > 0 else LOSS if total < 0 else DIM)]
+            for col, (text, color) in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setForeground(color)
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if col == 0 else Qt.AlignCenter)
+                item.setToolTip("From 6 am on this date until 6 am the following morning")
+                self.daily_table.setItem(row, col, item)
+        self.daily_hint.setText("Days run from 6 am to 6 am. A 3 am game belongs to the previous day."
+                                if rows else "No games in this period. Days run from 6 am to 6 am.")
 
     def pick_period(self, button):
         self.app.settings["period"] = button.property("days")
@@ -1113,16 +1223,20 @@ class App:
         self.asking = False
         self.reader = Reader()
         self.reader.done.connect(self.on_read)
+        self.reader.error.connect(self.on_ocr_error)
+        self.ocr_problem = None
         self.reading = False  # an auto-read is running
+        self.read_retry_at = 0
         self.recording = None  # clicks while recording the way to History
         self.seen = self.read_seen = None  # thumbnails: last look at the MMR box, and last one OCR'd
-        threading.Thread(target=ocr_engine, daemon=True).start()  # warm up so the first capture is quick
         self.watcher, self.last_game, self.auto_hidden = GameWatcher(), None, False
         self.portraits = Portraits()
         self.portraits.ready.connect(lambda: self.history and self.history.refresh())
         self.after_timer = QTimer(timeout=self.try_after_game)
 
         self.menu = rounded_menu()
+        self.menu.addAction(APP_TITLE).setEnabled(False)
+        self.menu.addSeparator()
         self.toggle_act = QAction("Hide widget", self.menu, triggered=self.toggle_overlay)
         self.capture_act = QAction("Capture MMR", self.menu, triggered=self.capture_mmr)
         self.go_act = QAction("Go to History + capture", self.menu, triggered=self.history_shortcut)
@@ -1146,7 +1260,7 @@ class App:
         self.menu.addAction(QAction("Quit", self.menu, triggered=self.quit))
         self.menu.aboutToShow.connect(self.update_menu)
         self.tray = QSystemTrayIcon(self.icon(), qt)
-        self.tray.setToolTip("Dota Rank Tracker")
+        self.tray.setToolTip(APP_TITLE)
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and self.toggle_overlay())
         self.tray.show()
@@ -1168,6 +1282,7 @@ class App:
         self.top_timer.start(5000)
         self.read_timer = QTimer(timeout=self.auto_read)
         self.read_timer.start(READ_MS)
+        self.reader.warm_up()
         self.start_game_feed()
 
     def start_game_feed(self):
@@ -1199,14 +1314,16 @@ class App:
             QTimer.singleShot(AFTER_GAME_S * 1000, self.after_game)
 
     def after_game(self):
-        """A few seconds after the Ancient falls: widget back (unless you hid it yourself),
-        then to History once the menu shows."""
-        if self.auto_hidden or not self.settings.get("hidden"):
-            self.overlay.show()
-            self.overlay.raise_()
-            self.overlay.update()
-            pin_topmost(int(self.overlay.winId()))
-            self.auto_hidden = False
+        """A few seconds after the Ancient falls: widget back (always: Ctrl+ability keys in a match
+        can hit the hide hotkey by accident), then to History once the menu shows."""
+        self.overlay.show()
+        self.overlay.raise_()
+        self.overlay.update()
+        pin_topmost(int(self.overlay.winId()))
+        self.auto_hidden = False
+        if self.settings.get("hidden"):
+            self.settings["hidden"] = False
+            save_settings(self.settings)
         note(f"after game: widget {'shown' if self.overlay.isVisible() else 'hidden'}")
         if self.settings.get("auto_after_game", True):
             self.after_until = time.time() + 20 * 60  # the post-game screen can stay up a while
@@ -1214,6 +1331,8 @@ class App:
             self.try_after_game()
 
     def try_after_game(self):
+        if not self.settings.get("auto_after_game", True):
+            return self.after_timer.stop()
         clicks, log = self.settings.get("history_clicks"), self.mmr_log()
         done = log and self.last_game and log[-1]["t"] > self.last_game["t"]  # captured already
         if not clicks or not START_SPOT.exists() or done or time.time() > self.after_until:
@@ -1225,14 +1344,22 @@ class App:
 
     def set_auto(self, on):
         self.settings["auto_after_game"] = on
+        if not on:
+            self.after_timer.stop()
+        self.overlay.update_auto()
+        self.auto_act.setChecked(on)
         save_settings(self.settings)
 
     def place(self):
         geo = self.qt.primaryScreen().availableGeometry()
         x, y = self.settings.get("pos") or (geo.right() - Overlay.W - 24, geo.top() + 24)
         # keep it on a visible screen if monitors changed
-        if not any(s.availableGeometry().contains(QPoint(x + 20, y + 20)) for s in self.qt.screens()):
+        screen = next((s for s in self.qt.screens() if s.availableGeometry().contains(QPoint(x + 20, y + 20))), None)
+        if screen is None:
             x, y = geo.right() - Overlay.W - 24, geo.top() + 24
+        else:
+            bounds = screen.availableGeometry()
+            x = max(bounds.left(), min(x, bounds.right() - Overlay.W + 1))
         self.overlay.move(x, y)
 
 
@@ -1297,9 +1424,10 @@ class App:
 
     def auto_read(self):
         """While Dota is in front, OCR the MMR box once it holds still (a menu page, not the moving
-        game world) and looks different from the last OCR. Costs nothing during a match."""
+        game world). Successful reads are cached; failures retry after a cooldown."""
         area = self.settings.get("mmr_area")
-        if not area or self.reading or self.asking or not dota_in_front():
+        if (not area or not self.mmr_log() or self.reading or self.asking
+                or time.monotonic() < self.read_retry_at or not dota_in_front()):
             return
         img = grab(self.qt, area)
         t = thumb(img)
@@ -1328,6 +1456,12 @@ class App:
         manual = mode == "manual"
         log = self.mmr_log()
         good = believable(log, value, manual)
+        if value is not None:
+            self.ocr_problem = None
+        if mode == "auto" and not good:
+            self.retry_auto_read()
+        if value is not None and not good:
+            note(f"rejected {mode} MMR {value}; last MMR {log[-1]['mmr'] if log else 'none'}")
         if good and medal_img is not None:  # any page can show a number there, e.g. Heroes (with Axe
             self.set_medal(medal_img)       # where your medal goes), so only keep it with a real MMR
         if manual and value is None:
@@ -1339,6 +1473,27 @@ class App:
                 self.save_mmr(value)
             if manual:
                 self.overlay.flash("captured", GOLD)
+        elif manual:
+            delta = value - log[-1]["mmr"]
+            self.overlay.flash("MMR change too large", LOSS)
+            self.tray.showMessage("Dota Rank Tracker", f"MMR read differs by {delta:+,}; "
+                                  f"maximum accepted change is +/-{MAX_JUMP}. It wasn't saved.")
+
+    def retry_auto_read(self):
+        self.reading = False
+        self.read_seen = None
+        self.read_retry_at = time.monotonic() + READ_RETRY_S
+
+    def on_ocr_error(self, message, mode):
+        if mode == "auto":
+            self.retry_auto_read()
+        if message != self.ocr_problem:
+            note(f"OCR error ({mode}): {message}")
+        if mode != "auto" or message != self.ocr_problem:
+            self.overlay.flash("OCR error", LOSS)
+            self.tray.showMessage("Dota Rank Tracker", "The OCR reader failed. See events.log in "
+                                  f"{DATA_DIR} for details. {message[:200]}")
+        self.ocr_problem = message
 
     def pick_area(self):
         """Two boxes on one frozen screenshot: the MMR number, then the medal (Esc skips the medal)."""
@@ -1399,13 +1554,18 @@ class App:
         def check():
             if clicking.is_alive():
                 return
-            value = read_number(grab(self.qt, self.settings["mmr_area"]))
+            try:
+                value = read_number(grab(self.qt, self.settings["mmr_area"]))
+            except (ImportError, OSError, ValueError, RuntimeError, KeyError) as exc:
+                self.go_timer.stop()
+                self.on_ocr_error(f"{type(exc).__name__}: {exc}", "manual")
+                return
             agreed, last[0] = value is not None and value == last[0], value  # not a frame mid-fade
             if agreed:
                 self.go_timer.stop()
                 self.capture_mmr(medal=False)  # the MMR right away; the medal is still fading in,
-                QTimer.singleShot(1200, lambda: self.settings.get("medal_area") and  # so snap it once the
-                                  self.set_medal(self.medal_img()))  # page has settled
+                QTimer.singleShot(1200, lambda: self.settings.get("medal_area") and
+                                  self.capture_mmr())  # re-check MMR before keeping the settled medal
             elif time.time() - start > len(clicks) * gap + 2:
                 self.go_timer.stop()
                 if retry:
@@ -1505,6 +1665,7 @@ def main():
     qt = QApplication(sys.argv)
     qt.setQuitOnLastWindowClosed(False)
     qt.setApplicationName("Dota Rank Tracker")
+    qt.setApplicationVersion(VERSION)
     qt.setStyleSheet(STYLE)
     App(qt)
     sys.exit(qt.exec())
